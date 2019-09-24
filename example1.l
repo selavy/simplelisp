@@ -1,3 +1,4 @@
-(define foo 1)
-(define bar 2)
-(cons foo bar)
+(*)
+(/)
+(* 3 3 3)
+(/ 27 3 3)

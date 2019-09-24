@@ -424,6 +424,90 @@ int builtin_cons(Atom args, Atom* result)
     return Error_OK;
 }
 
+int builtin_add(Atom args, Atom* result)
+{
+    int val = 0;
+    while (!nilp(args)) {
+        Atom a = car(args);
+        if (!intp(a))
+            return Error_Args;
+        val += toint(a);
+        args = cdr(args);
+    }
+    *result = make_int(val);
+    return Error_OK;
+
+    // Atom a, b;
+    // if (nilp(args) || list_length(args) != 2)
+    //     return Error_Args;
+
+    // a = car(args);
+    // b = car(cdr(args));
+    // if (!intp(a) || !intp(b))
+    //     return Error_Type;
+
+    // *result = make_int(toint(a) + toint(b));
+    // return Error_OK;
+}
+
+int builtin_subtract(Atom args, Atom* result)
+{
+    if (nilp(args)) {
+        *result = make_int(0);
+        return Error_OK;
+    }
+
+    Atom a = car(args);
+    if (!intp(a)) return Error_Args;
+    int val = toint(a);
+    args = cdr(args);
+    if (nilp(args)) {
+        *result = make_int(-val);
+        return Error_OK;
+    }
+
+    while (!nilp(args)) {
+        a = car(args);
+        if (!intp(a)) return Error_Args;
+        val -= toint(a);
+        args = cdr(args);
+    }
+
+    *result = make_int(val);
+    return Error_OK;
+}
+
+int builtin_multiply(Atom args, Atom* result)
+{
+    int val = 1;
+    while (!nilp(args)) {
+        Atom a = car(args);
+        if (!intp(a))
+            return Error_Args;
+        val *= toint(a);
+        args = cdr(args);
+    }
+    *result = make_int(val);
+    return Error_OK;
+}
+
+int builtin_divide(Atom args, Atom* result)
+{
+    if (nilp(args)) {
+        *result = make_int(1);
+        return Error_OK;
+    }
+    if (!intp(car(args))) return Error_Args;
+    int val = toint(car(args));
+    args = cdr(args);
+    while (!nilp(args)) {
+        val /= toint(car(args));
+        args = cdr(args);
+    }
+    *result = make_int(val);
+    return Error_OK;
+}
+
 Atom init() {
     F_QUOTE = make_sym("QUOTE");
     F_DEFINE = make_sym("DEFINE");
@@ -432,6 +516,10 @@ Atom init() {
     env_set(env, make_sym("CAR"),  make_builtin(&builtin_car));
     env_set(env, make_sym("CDR"),  make_builtin(&builtin_cdr));
     env_set(env, make_sym("CONS"), make_builtin(&builtin_cons));
+    env_set(env, make_sym("+"),    make_builtin(&builtin_add));
+    env_set(env, make_sym("-"),    make_builtin(&builtin_subtract));
+    env_set(env, make_sym("*"),    make_builtin(&builtin_multiply));
+    env_set(env, make_sym("/"),    make_builtin(&builtin_divide));
 
     return env;
 }
@@ -444,7 +532,6 @@ void execute(const char* p, Atom env)
     if (err == Error_OK) {
         err = eval_expr(expr, env, &result);
     }
-
     switch (err) {
         case Error_OK:
             print_expr(result); putchar('\n');
@@ -475,6 +562,27 @@ void repl()
         execute(buf, env);
         free(buf);
     }
+}
+
+void from_file(const char* filename)
+{
+    FILE *stream;
+    char *line = NULL;
+    size_t len = 0;
+    ssize_t nread;
+    Atom env = init();
+    stream = fopen(filename, "r");
+    if (stream == NULL) {
+        perror("fopen");
+        exit(EXIT_FAILURE);
+    }
+    while ((nread = getline(&line, &len, stream)) != -1) {
+        line[nread-1] = '\0';
+        // printf("Read line: '%s'\n", line);
+        execute(line, env);
+    }
+    free(line);
+    fclose(stream);
 }
 
 int main(int argc, char** argv)
@@ -557,24 +665,7 @@ int main(int argc, char** argv)
         fprintf(stderr, "Usage: %s [FILE]\n", argv[0]);
         exit(0);
     } else if (argc == 2) {
-        FILE *stream;
-        char *line = NULL;
-        size_t len = 0;
-        ssize_t nread;
-        Atom env = init();
-
-        stream = fopen(argv[1], "r");
-        if (stream == NULL) {
-            perror("fopen");
-            exit(EXIT_FAILURE);
-        }
-
-        while ((nread = getline(&line, &len, stream)) != -1) {
-            execute(line, env);
-        }
-
-        free(line);
-        fclose(stream);
+        from_file(argv[1]);
     } else {
         repl();
     }
