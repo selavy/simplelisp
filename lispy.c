@@ -9,21 +9,32 @@
 #define car(p) ((p).value.pair->atom[0])
 #define cdr(p) ((p).value.pair->atom[1])
 #define nilp(atom) ((atom).type == AtomType_Nil)
+#define symp(atom) ((atom).type == AtomType_Symbol)
+#define pairp(atom) ((atom).type == AtomType_Pair)
+#define intp(atom) ((atom).type == AtomType_Integer)
+#define builtinp(atom) ((atom).type == AtomType_Builtin)
 #define tosym(p) (p).value.symbol
 #define toint(p) (p).value.integer
+#define tobuiltin(p) (p).value.builtin
+
+struct Atom;
+
+typedef int (*Builtin)(struct Atom args, struct Atom* result);
 
 typedef struct Atom {
     enum {
         AtomType_Nil,
         AtomType_Pair,
         AtomType_Symbol,
-        AtomType_Integer
+        AtomType_Integer,
+        AtomType_Builtin,
     } type;
 
     union {
         struct Pair* pair;
         const char*  symbol;
         long         integer;
+        Builtin      builtin;
     } value;
 } Atom;
 
@@ -51,6 +62,14 @@ Atom make_int(long x)
     return a;
 }
 
+Atom make_builtin(Builtin fn)
+{
+    Atom a;
+    a.type = AtomType_Builtin;
+    a.value.builtin = fn;
+    return a;
+}
+
 Atom sym_table = { .type = AtomType_Nil };
 
 Atom make_sym(const char* s)
@@ -67,6 +86,23 @@ Atom make_sym(const char* s)
     tosym(p) = strdup(s);
     sym_table = cons(p, sym_table);
     return p;
+}
+
+Atom copy_list(Atom list)
+{
+    Atom a, p;
+    if (nilp(list))
+        return nil;
+
+    a = cons(car(list), nil);
+    p = a;
+    list = cdr(list);
+    while (!nilp(list)) {
+        cdr(p) = cons(car(list), nil);
+        p = cdr(p);
+        list = cdr(list);
+    }
+    return a;
 }
 
 void print_expr(Atom atom)
@@ -93,10 +129,13 @@ void print_expr(Atom atom)
             putchar(')');
             break;
         case AtomType_Symbol:
-            printf("%s", atom.value.symbol);
+            printf("%s", tosym(atom));
             break;
         case AtomType_Integer:
-            printf("%ld", atom.value.integer);
+            printf("%ld", toint(atom));
+            break;
+        case AtomType_Builtin:
+            printf("#<BUILTIN:%p>", tobuiltin(atom));
             break;
     }
 }
@@ -105,7 +144,11 @@ typedef enum {
     Error_OK = 0,
     Error_Syntax,
     Error_Unbound,
+    Error_Args,
+    Error_Type,
 } Error;
+
+#define TRY(err) do { int rc = (err); if (rc != Error_OK) return rc; } while (0)
 
 int lex(const char* str, const char** start, const char** end);
 int parse_simple(const char* start, const char* end, Atom* result);
@@ -166,30 +209,23 @@ int read_list(const char* start, const char** end, Atom* result)
     for (;;) {
         const char* token;
         Atom item;
-        Error err;
 
-        err = lex(*end, &token, end);
-        if (err != Error_OK)
-            return err;
+        TRY(lex(*end, &token, end));
         if (token[0] == ')')
             return Error_OK;
         if (token[0] == '.' && *end - token == 1) { // TODO: check this 2nd condition
             /* Improper list */
             if (nilp(p))
                 return Error_Syntax;
-            err = read_expr(*end, end, &item);
-            if (err)
-                return err;
+            TRY(read_expr(*end, end, &item));
             cdr(p) = item;
-            err = lex(*end, &token, end);
-            if (!err && token[0] != ')')
+            TRY(lex(*end, &token, end));
+            if (token[0] != ')')
                 return Error_Syntax;
-            return err;
+            return Error_OK;
         }
 
-        err = read_expr(token, end, &item);
-        if (err)
-            return err;
+        TRY(read_expr(token, end, &item));
         if (nilp(p)) {
             *result = cons(item, nil);
             p = *result;
@@ -257,8 +293,193 @@ int env_set(Atom env, Atom symbol, Atom value)
     return Error_OK;
 }
 
+int apply(Atom fn, Atom args, Atom* result)
+{
+    if (!builtinp(fn))
+        return Error_Type;
+    return (*tobuiltin(fn))(args, result);
+}
+
+int listp(Atom expr)
+{
+    while (!nilp(expr)) {
+        if (expr.type != AtomType_Pair)
+            return 0;
+        expr = cdr(expr);
+    }
+    return 1;
+}
+
+Atom F_QUOTE;
+Atom F_DEFINE;
+
+int symcmp(Atom a, Atom b) {
+    assert(symp(a));
+    assert(symp(b));
+    return tosym(a) == tosym(b);
+}
+
+int eval_expr(Atom expr, Atom env, Atom* result)
+{
+    Atom op, args, p;
+
+    if (symp(expr)) {
+        return env_get(env, expr, result);
+    } else if (!pairp(expr)) {
+        *result = expr;
+        return Error_OK;
+    } else if (!listp(expr)) {
+        return Error_Syntax;
+    }
+
+    op = car(expr);
+    args = cdr(expr);
+
+    if (symp(op)) {
+        if (symcmp(op, F_QUOTE)) {
+            // form ( <QUOTE> . ( <ATOM> . NIL ) )
+            if (nilp(args) || !nilp(cdr(args)))
+                return Error_Args;
+            *result = car(args);
+            return Error_OK;
+        } else if (symcmp(op, F_DEFINE)) {
+            // form: ( <DEFINE> . ( <SYMBOL> . ( <EXPR> . NIL ) ) )
+            Atom sym, val;
+            if (nilp(args) || nilp(cdr(args)) || !nilp(cdr(cdr(args))))
+                return Error_Args;
+            sym = car(args);
+            if (!symp(sym))
+                return Error_Type;
+            TRY(eval_expr(car(cdr(args)), env, &val));
+            *result = sym;
+            env_set(env, sym, val);
+            return Error_OK;
+        } else {
+            /* Evaluate operator */
+            TRY(eval_expr(op, env, &op));
+
+            /* Evaluate arguments */
+            // TODO: why do I need to copy the list?
+            args = copy_list(args);
+            p = args;
+            while (!nilp(p)) {
+                TRY(eval_expr(car(p), env, &car(p)));
+                p = cdr(p);
+            }
+
+            return apply(op, args, result);
+        }
+    }
+
+    return Error_Syntax;
+}
+
+int builtin_car(Atom args, Atom* result)
+{
+    if (nilp(args) || !nilp(cdr(args)))
+        return Error_Args;
+
+    if (nilp(car(args)))
+        *result = nil;
+    else if (!pairp(car(args)))
+        return Error_Type;
+    else
+        *result = car(car(args));
+
+    return Error_OK;
+}
+
+int builtin_cdr(Atom args, Atom* result)
+{
+    if (nilp(args) || !nilp(cdr(args)))
+        return Error_Args;
+
+    if (nilp(car(args)))
+        *result = nil;
+    else if (!pairp(car(args)))
+        return Error_Type;
+    else
+        *result = cdr(car(args));
+
+    return Error_OK;
+}
+
+int list_length(Atom list)
+{
+    int result = 0;
+    while (!nilp(list)) {
+        assert(pairp(list));
+        ++result;
+        list = cdr(list);
+    }
+    return result;
+}
+
+int builtin_cons(Atom args, Atom* result)
+{
+    // if (nilp(args) || nilp(cdr(args)) || !nilp(cdr(cdr(args))))
+    if (nilp(args) || list_length(args) != 2)
+        return Error_Args;
+    *result = cons(car(args), car(cdr(args)));
+    return Error_OK;
+}
+
+Atom init() {
+    F_QUOTE = make_sym("QUOTE");
+    F_DEFINE = make_sym("DEFINE");
+    Atom env = env_create(nil);
+
+    env_set(env, make_sym("CAR"),  make_builtin(&builtin_car));
+    env_set(env, make_sym("CDR"),  make_builtin(&builtin_cdr));
+    env_set(env, make_sym("CONS"), make_builtin(&builtin_cons));
+
+    return env;
+}
+
+void execute(const char* p, Atom env)
+{
+    Error err;
+    Atom expr, result;
+    err = read_expr(p, &p, &expr);
+    if (err == Error_OK) {
+        err = eval_expr(expr, env, &result);
+    }
+
+    switch (err) {
+        case Error_OK:
+            print_expr(result); putchar('\n');
+            break;
+        case Error_Syntax:
+            printf("syntax error\n");
+            break;
+        case Error_Unbound:
+            printf("error: symbol not bound\n");
+            break;
+        case Error_Args:
+            printf("error: incorrect number of arguments\n");
+            break;
+        case Error_Type:
+            printf("error: incorrect type\n");
+            break;
+    }
+}
+
+void repl()
+{
+    Atom env = init();
+    char* buf = NULL;
+    while ((buf = readline("> ")) != NULL) {
+        if (strlen(buf) > 0) {
+            add_history(buf);
+        }
+        execute(buf, env);
+        free(buf);
+    }
+}
+
 int main(int argc, char** argv)
 {
+#if RUN_TESTS
     print_expr(make_int(42)); putchar('\n');
     print_expr(make_sym("FOO")); putchar('\n');
     print_expr(cons(make_sym("X"), make_sym("Y"))); putchar('\n');
@@ -329,31 +550,34 @@ int main(int argc, char** argv)
     assert(tosym(ret) == tosym(make_sym("VENUS")));
 
     printf("Passed.\n");
-    return 0;
+#endif
+    // return 0;
 
-    char* buf = NULL;
-    while ((buf = readline("> ")) != NULL) {
-        if (strlen(buf) > 0) {
-            add_history(buf);
+    if (argc > 2) {
+        fprintf(stderr, "Usage: %s [FILE]\n", argv[0]);
+        exit(0);
+    } else if (argc == 2) {
+        FILE *stream;
+        char *line = NULL;
+        size_t len = 0;
+        ssize_t nread;
+        Atom env = init();
+
+        stream = fopen(argv[1], "r");
+        if (stream == NULL) {
+            perror("fopen");
+            exit(EXIT_FAILURE);
         }
 
-        const char* p = buf;
-        Error err;
-        Atom expr;
-        err = read_expr(p, &p, &expr);
-        switch (err) {
-        case Error_Syntax:
-            printf("Syntax Error\n");
-            break;
-        case Error_OK:
-            print_expr(expr); putchar('\n');
-            break;
-        case Error_Unbound:
-            printf("Unbound symbol\n");
-            break;
+        while ((nread = getline(&line, &len, stream)) != -1) {
+            execute(line, env);
         }
+
+        free(line);
+        fclose(stream);
+    } else {
+        repl();
     }
-    free(buf);
 
     return 0;
 }
