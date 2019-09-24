@@ -9,8 +9,8 @@
 #define car(p) ((p).value.pair->atom[0])
 #define cdr(p) ((p).value.pair->atom[1])
 #define nilp(atom) ((atom).type == AtomType_Nil)
-#define assym(p) (p).value.symbol
-#define asint(p) (p).value.integer
+#define tosym(p) (p).value.symbol
+#define toint(p) (p).value.integer
 
 typedef struct Atom {
     enum {
@@ -31,9 +31,9 @@ struct Pair {
     struct Atom atom[2];
 };
 
-static const Atom nil = { .type = AtomType_Nil };
+const Atom nil = { .type = AtomType_Nil };
 
-static Atom cons(Atom carval, Atom cdrval)
+Atom cons(Atom carval, Atom cdrval)
 {
     Atom p;
     p.type = AtomType_Pair;
@@ -43,7 +43,7 @@ static Atom cons(Atom carval, Atom cdrval)
     return p;
 }
 
-static Atom make_int(long x)
+Atom make_int(long x)
 {
     Atom a;
     a.type = AtomType_Integer;
@@ -51,25 +51,25 @@ static Atom make_int(long x)
     return a;
 }
 
-static Atom sym_table = { .type = AtomType_Nil };
+Atom sym_table = { .type = AtomType_Nil };
 
-static Atom make_sym(const char* s)
+Atom make_sym(const char* s)
 {
     Atom a, p = sym_table;
     while (!nilp(p)) {
         assert(p.type == AtomType_Pair);
         a = car(p);
-        if (!strcmp(assym(a), s))
+        if (!strcmp(tosym(a), s))
             return a;
         p = cdr(p);
     }
     p.type = AtomType_Symbol;
-    assym(p) = strdup(s);
+    tosym(p) = strdup(s);
     sym_table = cons(p, sym_table);
     return p;
 }
 
-static void print_expr(Atom atom)
+void print_expr(Atom atom)
 {
     switch (atom.type) {
         case AtomType_Nil:
@@ -104,14 +104,15 @@ static void print_expr(Atom atom)
 typedef enum {
     Error_OK = 0,
     Error_Syntax,
+    Error_Unbound,
 } Error;
 
-static int lex(const char* str, const char** start, const char** end);
-static int parse_simple(const char* start, const char* end, Atom* result);
-static int read_list(const char* start, const char** end, Atom* result);
-static int read_expr(const char* input, const char** end, Atom* result);
+int lex(const char* str, const char** start, const char** end);
+int parse_simple(const char* start, const char* end, Atom* result);
+int read_list(const char* start, const char** end, Atom* result);
+int read_expr(const char* input, const char** end, Atom* result);
 
-static int lex(const char* str, const char** start, const char** end)
+int lex(const char* str, const char** start, const char** end)
 {
     const char* const ws     = " \t\n";
     const char* const delim  = "() \t\n";
@@ -132,7 +133,7 @@ static int lex(const char* str, const char** start, const char** end)
     return Error_OK;
 }
 
-static int parse_simple(const char* start, const char* end, Atom* result)
+int parse_simple(const char* start, const char* end, Atom* result)
 {
     char* buf, *p;
 
@@ -157,7 +158,7 @@ static int parse_simple(const char* start, const char* end, Atom* result)
     return Error_OK;
 }
 
-static int read_list(const char* start, const char** end, Atom* result)
+int read_list(const char* start, const char** end, Atom* result)
 {
     Atom p;
     *end = start;
@@ -199,7 +200,7 @@ static int read_list(const char* start, const char** end, Atom* result)
     }
 }
 
-static int read_expr(const char* input, const char** end, Atom* result)
+int read_expr(const char* input, const char** end, Atom* result)
 {
     const char* token;
     Error err;
@@ -214,6 +215,46 @@ static int read_expr(const char* input, const char** end, Atom* result)
         return Error_Syntax;
     else
         return parse_simple(token, *end, result);
+}
+
+Atom env_create(Atom parent) {
+    return cons(parent, nil);
+}
+
+int env_get(Atom env, Atom symbol, Atom* result)
+{
+    Atom parent = car(env);
+    Atom entries = cdr(env);
+    while (!nilp(entries)) {
+        Atom entry = car(entries);
+        if (tosym(car(entry)) == tosym(symbol)) {
+            *result = cdr(entry);
+            return Error_OK;
+        }
+        entries = cdr(entries);
+    }
+
+    if (nilp(parent))
+        return Error_Unbound;
+
+    return env_get(parent, symbol, result);
+}
+
+// TODO: this function doesn't need a return code?
+int env_set(Atom env, Atom symbol, Atom value)
+{
+    Atom entries = cdr(env);
+    while (!nilp(entries)) {
+        Atom entry = car(entries);
+        if (tosym(car(entry)) == tosym(symbol)) {
+            cdr(entry) = value;
+            return Error_OK;
+        }
+        entries = cdr(entries);
+    }
+    Atom entry = cons(symbol, value);
+    cdr(env) = cons(entry, cdr(env));
+    return Error_OK;
 }
 
 int main(int argc, char** argv)
@@ -237,9 +278,58 @@ int main(int argc, char** argv)
 
     Atom a = make_sym("FOO");
     Atom b = make_sym("FOO");
-    assert(assym(a) == assym(b));
+    assert(tosym(a) == tosym(b));
     Atom c = make_sym("BAR");
-    assert(assym(a) != assym(c));
+    assert(tosym(a) != tosym(c));
+
+    //------------------------------------------------------------
+    // Environment Tests
+    //------------------------------------------------------------
+    Atom parent = cons(nil, nil);
+    Atom env    = cons(parent, nil);
+    Error err;
+    Atom ret;
+
+    // find unbound symbol
+    err = env_get(env, make_sym("FOO"), &ret);
+    assert(err == Error_Unbound);
+
+    // set value in child + access it
+    err = env_set(env, make_sym("FOO"), make_sym("BAR"));
+    assert(err == Error_OK);
+    err = env_get(env, make_sym("FOO"), &ret);
+    assert(tosym(ret) == tosym(make_sym("BAR")));
+
+    // set value in parent + access it from child
+    err = env_set(parent, make_sym("HELLO"), make_sym("WORLD"));
+    assert(err == Error_OK);
+    err = env_get(env, make_sym("HELLO"), &ret);
+    assert(err == Error_OK);
+    assert(tosym(ret) == tosym(make_sym("WORLD")));
+
+    // set another value in parent + access it from child
+    err = env_set(parent, make_sym("GOODBYE"), make_sym("SOMEONE"));
+    assert(err == Error_OK);
+    err = env_get(env, make_sym("GOODBYE"), &ret);
+    assert(err == Error_OK);
+    assert(tosym(ret) == tosym(make_sym("SOMEONE")));
+
+    // set value in child that shadows parent + access it from child
+    err = env_set(env, make_sym("GOODBYE"), make_sym("SOMEONE-ELSE"));
+    assert(err == Error_OK);
+    err = env_get(env, make_sym("GOODBYE"), &ret);
+    assert(err == Error_OK);
+    assert(tosym(ret) == tosym(make_sym("SOMEONE-ELSE")));
+
+    // replace value in parent + access it from child
+    err = env_set(parent, make_sym("HELLO"), make_sym("VENUS"));
+    assert(err == Error_OK);
+    err = env_get(env, make_sym("HELLO"), &ret);
+    assert(err == Error_OK);
+    assert(tosym(ret) == tosym(make_sym("VENUS")));
+
+    printf("Passed.\n");
+    return 0;
 
     char* buf = NULL;
     while ((buf = readline("> ")) != NULL) {
@@ -251,10 +341,16 @@ int main(int argc, char** argv)
         Error err;
         Atom expr;
         err = read_expr(p, &p, &expr);
-        if (err != Error_OK) {
+        switch (err) {
+        case Error_Syntax:
             printf("Syntax Error\n");
-        } else {
+            break;
+        case Error_OK:
             print_expr(expr); putchar('\n');
+            break;
+        case Error_Unbound:
+            printf("Unbound symbol\n");
+            break;
         }
     }
     free(buf);
