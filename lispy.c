@@ -2,6 +2,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <ctype.h>
+#include <readline/readline.h>
+#include <readline/history.h>
 
 #define car(p) ((p).value.pair->atom[0])
 #define cdr(p) ((p).value.pair->atom[1])
@@ -98,6 +101,121 @@ static void print_expr(Atom atom)
     }
 }
 
+typedef enum {
+    Error_OK = 0,
+    Error_Syntax,
+} Error;
+
+static int lex(const char* str, const char** start, const char** end);
+static int parse_simple(const char* start, const char* end, Atom* result);
+static int read_list(const char* start, const char** end, Atom* result);
+static int read_expr(const char* input, const char** end, Atom* result);
+
+static int lex(const char* str, const char** start, const char** end)
+{
+    const char* const ws     = " \t\n";
+    const char* const delim  = "() \t\n";
+    const char* const prefix = "()";
+
+    str += strspn(str, ws);
+    if (*str == '\0') {
+        *start = *end = NULL;
+        return Error_Syntax;
+    }
+
+    *start = str;
+    if (strchr(prefix, *str) != NULL)
+        *end = str + 1;
+    else
+        *end = str + strcspn(str, delim);
+
+    return Error_OK;
+}
+
+static int parse_simple(const char* start, const char* end, Atom* result)
+{
+    char* buf, *p;
+
+    /* Try Integer */
+    long val = strtol(start, &p, 10);
+    if (p == end) {
+        result->type = AtomType_Integer;
+        result->value.integer = val;
+        return Error_OK;
+    }
+
+    /* Try NIL or Symbol */
+    buf = malloc(end - start + 1);
+    p = buf;
+    while (start != end)
+        *p++ = toupper(*start++);
+    if (!strcmp(buf, "NIL"))
+        *result = nil;
+    else
+        *result = make_sym(buf);
+    free(buf);
+    return Error_OK;
+}
+
+static int read_list(const char* start, const char** end, Atom* result)
+{
+    Atom p;
+    *end = start;
+    p = *result = nil;
+    for (;;) {
+        const char* token;
+        Atom item;
+        Error err;
+
+        err = lex(*end, &token, end);
+        if (err != Error_OK)
+            return err;
+        if (token[0] == ')')
+            return Error_OK;
+        if (token[0] == '.' && *end - token == 1) { // TODO: check this 2nd condition
+            /* Improper list */
+            if (nilp(p))
+                return Error_Syntax;
+            err = read_expr(*end, end, &item);
+            if (err)
+                return err;
+            cdr(p) = item;
+            err = lex(*end, &token, end);
+            if (!err && token[0] != ')')
+                return Error_Syntax;
+            return err;
+        }
+
+        err = read_expr(token, end, &item);
+        if (err)
+            return err;
+        if (nilp(p)) {
+            *result = cons(item, nil);
+            p = *result;
+        } else {
+            cdr(p) = cons(item, nil);
+            p = cdr(p);
+        }
+    }
+}
+
+static int read_expr(const char* input, const char** end, Atom* result)
+{
+    const char* token;
+    Error err;
+
+    err = lex(input, &token, end);
+    if (err == Error_Syntax)
+        return err;
+
+    if (token[0] == '(')
+        return read_list(*end, end, result);
+    else if (token[0] == ')')
+        return Error_Syntax;
+    else
+        return parse_simple(token, *end, result);
+}
+
 int main(int argc, char** argv)
 {
     print_expr(make_int(42)); putchar('\n');
@@ -122,6 +240,24 @@ int main(int argc, char** argv)
     assert(assym(a) == assym(b));
     Atom c = make_sym("BAR");
     assert(assym(a) != assym(c));
+
+    char* buf = NULL;
+    while ((buf = readline("> ")) != NULL) {
+        if (strlen(buf) > 0) {
+            add_history(buf);
+        }
+
+        const char* p = buf;
+        Error err;
+        Atom expr;
+        err = read_expr(p, &p, &expr);
+        if (err != Error_OK) {
+            printf("Syntax Error\n");
+        } else {
+            print_expr(expr); putchar('\n');
+        }
+    }
+    free(buf);
 
     return 0;
 }
