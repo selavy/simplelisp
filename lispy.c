@@ -75,6 +75,9 @@ const char* errormsg = NULL;
 // #define SETERR(x) errormsg = errormsg != NULL ? errormsg : x;
 #define SETERR(x, ...) seterr("error(%d): " x, __LINE__, ##__VA_ARGS__)
 
+#define CHECKTYPE(x, pred) do { if (!pred(x)) { return Error_Type; } } while (0)
+#define CHECKARGN(args, n) do { if (list_length(args) != n) { return Error_Args; } } while (0)
+
 void seterr(const char *fmt, ...)
 {
     int size = 0;
@@ -455,36 +458,40 @@ int eval_expr(Atom expr, Atom env, Atom* result)
 
     op = car(expr);
     args = cdr(expr);
-
     if (symbolp(op)) {
         if (symcmp(op, F_IF)) {
             // form ( <IF> . ( <TEST> . ( <TRUE-EXPR> . ( <FALSE-EXPRE> . NIL ) ) ) )
             Atom cond, val;
-            if (list_length(args) != 3)
-                return Error_Args;
+            CHECKARGN(args, 3);
             TRY(eval_expr(car(args), env, &cond));
             val = nilp(cond) ? car(cdr(cdr(args))) : car(cdr(args));
             return eval_expr(val, env, result);
         } else if (symcmp(op, F_QUOTE)) {
             // form ( <QUOTE> . ( <ATOM> . NIL ) )
-            if (nilp(args) || !nilp(cdr(args)))
-                return Error_Args;
+            CHECKARGN(args, 1);
             *result = car(args);
             return Error_OK;
         } else if (symcmp(op, F_DEFINE)) {
-            // form: ( <DEFINE> . ( <SYMBOL> . ( <EXPR> . NIL ) ) )
+            // form #1: ( <DEFINE> . ( <SYMBOL> . ( <EXPR> . NIL ) ) )
+            // form #2: ( <DEFINE> . ( ( <NAME> . <ARGS>... ) . ( <BODY> . NIL ) ) )
             Atom sym, val;
-            if (nilp(args) || nilp(cdr(args)) || !nilp(cdr(cdr(args))))
-                return Error_Args;
+            if (nilp(args)) return Error_Syntax;
             sym = car(args);
-            if (!symbolp(sym)) {
-                SETERR("attempted to bind to non-symbol: %s", typename(sym));
-                return Error_Type;
+            if (symbolp(sym)) { // form #1
+                CHECKARGN(args, 2);
+                sym = car(args);
+                CHECKTYPE(sym, symbolp);
+                TRY(eval_expr(car(cdr(args)), env, &val));
+            } else if (pairp(sym)) { // form #2
+                CHECKARGN(args, 2);
+                TRY(make_closure(env, cdr(sym), cdr(args), &val));
+                sym = car(sym);
+                CHECKTYPE(sym, symbolp);
+            } else {
+                return Error_Syntax;
             }
-            TRY(eval_expr(car(cdr(args)), env, &val));
             *result = sym;
-            env_set(env, sym, val);
-            return Error_OK;
+            return env_set(env, sym, val);
         } else if (symcmp(op, F_LAMBDA)) {
             // form: ( <LAMBDA> . ( (ARGS...) . ( (BODY...) . NIL ) ) )
             if (nilp(args) || nilp(cdr(args)))
