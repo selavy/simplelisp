@@ -16,5 +16,10 @@
 (define (list . items)
   (foldr cons nil items))
 
+; (define (add-two x) (+ x 2))
+
 (define (reverse list)
+  ; this is a comment
   (foldl (lambda (a x) (cons x a)) nil list))
+
+; (define (add-one x) (+ x 1))

@@ -267,11 +267,23 @@ int lex(const char* str, const char** start, const char** end)
     const char* const delim  = "() \t\n";
     const char* const prefix = "()\'";
 
-    str += strspn(str, ws);
-    if (*str == '\0') {
-        *start = *end = NULL;
-        SETERR("found unexpected end-of-input");
-        return Error_Syntax;
+    for (;;) {
+        str += strspn(str, ws);
+        if (*str == '\0') {
+            *start = *end = NULL;
+            SETERR("found unexpected end-of-input");
+            return Error_Syntax;
+        }
+        if (str[0] != ';') {
+            break;
+        }
+        str = strchr(str, '\n');
+        ++str;
+        if (*str == '\0') {
+            *start = *end = NULL;
+            SETERR("found unexpected end-of-input");
+            return Error_Syntax;
+        }
     }
 
     *start = str;
@@ -734,6 +746,7 @@ int builtin_numgte(Atom args, Atom* result)
 
 int builtin_apply(Atom args, Atom* result)
 {
+    // form: (APPLY fn arg-list)
     Atom fn;
     if (list_length(args) != 2)
         return Error_Args;
@@ -742,6 +755,45 @@ int builtin_apply(Atom args, Atom* result)
     args = car(cdr(args));
     CHECKTYPE(args, listp);
     return apply(fn, args, result);
+}
+
+int builtin_eq(Atom args, Atom* result)
+{
+    if (list_length(args) != 2)
+        return Error_Args;
+    int eq = 0;
+    Atom a = car(args);
+    Atom b = car(cdr(args));
+    if (a.type == b.type) {
+        switch (a.type) {
+            case AtomType_Nil:
+                eq = 1;
+                break;
+            case AtomType_Pair:
+            case AtomType_Closure:
+            case AtomType_Macro:
+               eq = a.value.pair == b.value.pair;
+               break;
+            case AtomType_Symbol:
+               eq = tosymbol(a) == tosymbol(b);
+               break;
+            case AtomType_Integer:
+               eq = tointeger(a) == tointeger(b);
+               break;
+            case AtomType_Builtin:
+               eq = tobuiltin(a) == tobuiltin(b);
+               break;
+        }
+    }
+    *result = eq ? make_sym("T") : nil;
+    return Error_OK;
+}
+
+int builtin_pairp(Atom args, Atom* result)
+{
+    CHECKARGN(args, 1);
+    *result = pairp(car(args)) ? make_sym("T") : nil;
+    return Error_OK;
 }
 
 char* slurp(const char* filename)
@@ -777,6 +829,7 @@ void load_file(Atom env, const char* filename)
                 print_expr(result); putchar('\n');
             }
         }
+        errormsg = NULL;
 
     }
     free(text);
@@ -790,16 +843,19 @@ Atom init() {
     F_DEFMACRO = make_sym("DEFMACRO");
     Atom env = env_create(nil);
 
-    env_set(env, make_sym("CAR"),  make_builtin(&builtin_car));
-    env_set(env, make_sym("CDR"),  make_builtin(&builtin_cdr));
-    env_set(env, make_sym("CONS"), make_builtin(&builtin_cons));
-    env_set(env, make_sym("+"),    make_builtin(&builtin_add));
-    env_set(env, make_sym("-"),    make_builtin(&builtin_subtract));
-    env_set(env, make_sym("*"),    make_builtin(&builtin_multiply));
-    env_set(env, make_sym("/"),    make_builtin(&builtin_divide));
-    env_set(env, make_sym("="),    make_builtin(&builtin_numeq));
-    env_set(env, make_sym("<"),    make_builtin(&builtin_numlt));
-    env_set(env, make_sym(">"),    make_builtin(&builtin_numgt));
+    env_set(env, make_sym("CAR"),   make_builtin(&builtin_car));
+    env_set(env, make_sym("CDR"),   make_builtin(&builtin_cdr));
+    env_set(env, make_sym("CONS"),  make_builtin(&builtin_cons));
+    env_set(env, make_sym("APPLY"), make_builtin(&builtin_apply));
+    env_set(env, make_sym("EQ?"),   make_builtin(&builtin_eq));
+    env_set(env, make_sym("PAIR?"), make_builtin(&builtin_pairp));
+    env_set(env, make_sym("+"),     make_builtin(&builtin_add));
+    env_set(env, make_sym("-"),     make_builtin(&builtin_subtract));
+    env_set(env, make_sym("*"),     make_builtin(&builtin_multiply));
+    env_set(env, make_sym("/"),     make_builtin(&builtin_divide));
+    env_set(env, make_sym("="),     make_builtin(&builtin_numeq));
+    env_set(env, make_sym("<"),     make_builtin(&builtin_numlt));
+    env_set(env, make_sym(">"),     make_builtin(&builtin_numgt));
     env_set(env, make_sym("<="),    make_builtin(&builtin_numlte));
     env_set(env, make_sym(">="),    make_builtin(&builtin_numgte));
 
