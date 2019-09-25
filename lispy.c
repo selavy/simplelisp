@@ -257,7 +257,7 @@ int lex(const char* str, const char** start, const char** end)
 {
     const char* const ws     = " \t\n";
     const char* const delim  = "() \t\n";
-    const char* const prefix = "()";
+    const char* const prefix = "()\'";
 
     str += strspn(str, ws);
     if (*str == '\0') {
@@ -312,9 +312,9 @@ int read_list(const char* start, const char** end, Atom* result)
         Atom item;
 
         TRY(lex(*end, &token, end));
-        if (token[0] == ')')
+        if (token[0] == ')') {
             return Error_OK;
-        if (token[0] == '.' && *end - token == 1) { // TODO: check this 2nd condition
+        } else if (token[0] == '.' && *end - token == 1) { // TODO: check this 2nd condition
             /* Improper list */
             if (nilp(p)) {
                 SETERR("improper list found in list context");
@@ -350,6 +350,9 @@ int read_expr(const char* input, const char** end, Atom* result)
     } else if (token[0] == ')') {
         SETERR("expression list missing closing paren");
         return Error_Syntax;
+    } else if (token[0] == '\'') {
+        *result = cons(F_QUOTE, cons(nil, nil));
+        return read_expr(*end, end, &car(cdr(*result)));
     } else {
         return parse_simple(token, *end, result);
     }
