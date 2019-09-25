@@ -1,0 +1,5 @@
+(define (sum-list xs) (if xs (+ (car xs) (sum-list (cdr xs))) 0))
+(sum-list '(1 2 3))
+(define (add . xs) (sum-list xs))
+(add 1 2 3)
+(add 1 (- 4 2) (/ 9 3))

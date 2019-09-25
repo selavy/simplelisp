@@ -183,17 +183,15 @@ int make_closure(Atom env, Atom args, Atom body, Atom* result)
 {
     Atom p;
 
-    if (!listp(args) || !listp(body)) {
-        SETERR("args or body of closure not a list");
+    if (!listp(body))
         return Error_Syntax;
-    }
 
     p = args;
     while (!nilp(p)) {
-        if (!symbolp(car(p))) {
-            SETERR("expected symbol in parameters list: %s", typename(car(p)));
+        if (symbolp(p))
+            break;
+        else if (!pairp(p) || !symbolp(car(p)))
             return Error_Type;
-        }
         p = cdr(p);
     }
     *result = cons(env, cons(args, body));
@@ -421,6 +419,12 @@ int apply(Atom fn, Atom args, Atom* result)
     body = cdr(cdr(fn));
 
     while (!nilp(params) && !nilp(args)) {
+        if (symbolp(params)) {
+            env_set(env, params, args);
+            params = nil;
+            args = nil;
+            break;
+        }
         env_set(env, car(params), car(args));
         params = cdr(params);
         args   = cdr(args);
