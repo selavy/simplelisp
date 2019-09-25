@@ -15,6 +15,7 @@
 #define integerp(atom) ((atom).type == AtomType_Integer)
 #define builtinp(atom) ((atom).type == AtomType_Builtin)
 #define closurep(atom) ((atom).type == AtomType_Closure)
+#define macrop(atom) ((atom).type == AtomType_Macro)
 #define tosymbol(p) (p).value.symbol
 #define tointeger(p) (p).value.integer
 #define tobuiltin(p) (p).value.builtin
@@ -30,6 +31,7 @@ const char* const TypeNames[] = {
     "INTEGER",
     "BUILTIN",
     "CLOSURE",
+    "MACRO",
 };
 
 typedef struct Atom {
@@ -40,6 +42,7 @@ typedef struct Atom {
         AtomType_Integer,
         AtomType_Builtin,
         AtomType_Closure,
+        AtomType_Macro,
     } type;
 
     union {
@@ -60,6 +63,7 @@ Atom F_IF;
 Atom F_QUOTE;
 Atom F_DEFINE;
 Atom F_LAMBDA;
+Atom F_DEFMACRO;
 
 typedef enum {
     Error_OK = 0,
@@ -250,6 +254,9 @@ void print_expr(Atom atom)
             break;
         case AtomType_Closure:
             printf("#<CLOSURE:%p>", atom.value.pair);
+            break;
+        case AtomType_Macro:
+            printf("#<MACRO>");
             break;
     }
 }
@@ -501,11 +508,33 @@ int eval_expr(Atom expr, Atom env, Atom* result)
             if (nilp(args) || nilp(cdr(args)))
                 return Error_Args;
             return make_closure(env, car(args), cdr(args), result);
+        } else if (symcmp(op, F_DEFMACRO)) {
+            Atom name, macro;
+
+            if (nilp(args) || nilp(cdr(args)))
+                return Error_Args;
+            if (!pairp(car(args)))
+                return Error_Syntax;
+            name = car(car(args));
+            if (!symbolp(name))
+                return Error_Type;
+            TRY(make_closure(env, cdr(car(args)), cdr(args), &macro));
+            macro.type = AtomType_Macro;
+            *result = name;
+            return env_set(env, name, macro);
         }
     }
 
     /* Evaluate operator */
     TRY(eval_expr(op, env, &op));
+
+    /* Is it a macro? */
+    if (macrop(op)) {
+        Atom expansion;
+        op.type = AtomType_Closure;
+        TRY(apply(op, args, &expansion));
+        return eval_expr(expansion, env, result);
+    }
 
     /* Evaluate arguments */
     // TODO: why do I need to copy the list?
@@ -708,6 +737,7 @@ Atom init() {
     F_DEFINE = make_sym("DEFINE");
     F_LAMBDA = make_sym("LAMBDA");
     F_IF = make_sym("IF");
+    F_DEFMACRO = make_sym("DEFMACRO");
     Atom env = env_create(nil);
 
     env_set(env, make_sym("CAR"),  make_builtin(&builtin_car));
