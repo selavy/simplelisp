@@ -3,23 +3,34 @@
 #include <string.h>
 #include <assert.h>
 #include <ctype.h>
+#include <stdarg.h>
 #include <readline/readline.h>
 #include <readline/history.h>
 
 #define car(p) ((p).value.pair->atom[0])
 #define cdr(p) ((p).value.pair->atom[1])
 #define nilp(atom) ((atom).type == AtomType_Nil)
-#define symp(atom) ((atom).type == AtomType_Symbol)
+#define symbolp(atom) ((atom).type == AtomType_Symbol)
 #define pairp(atom) ((atom).type == AtomType_Pair)
-#define intp(atom) ((atom).type == AtomType_Integer)
+#define integerp(atom) ((atom).type == AtomType_Integer)
 #define builtinp(atom) ((atom).type == AtomType_Builtin)
-#define tosym(p) (p).value.symbol
-#define toint(p) (p).value.integer
+#define closurep(atom) ((atom).type == AtomType_Closure)
+#define tosymbol(p) (p).value.symbol
+#define tointeger(p) (p).value.integer
 #define tobuiltin(p) (p).value.builtin
 
 struct Atom;
 
 typedef int (*Builtin)(struct Atom args, struct Atom* result);
+
+const char* const TypeNames[] = {
+    "NIL",
+    "PAIR",
+    "SYMBOL",
+    "INTEGER",
+    "BUILTIN",
+    "CLOSURE",
+};
 
 typedef struct Atom {
     enum {
@@ -28,6 +39,7 @@ typedef struct Atom {
         AtomType_Symbol,
         AtomType_Integer,
         AtomType_Builtin,
+        AtomType_Closure,
     } type;
 
     union {
@@ -38,11 +50,72 @@ typedef struct Atom {
     } value;
 } Atom;
 
+const char* typename(Atom p) { return TypeNames[p.type]; }
+
 struct Pair {
     struct Atom atom[2];
 };
 
+Atom F_QUOTE;
+Atom F_DEFINE;
+Atom F_LAMBDA;
+
+typedef enum {
+    Error_OK = 0,
+    Error_Syntax,
+    Error_Unbound,
+    Error_Args,
+    Error_Type,
+} Error;
+
+const char* errormsg = NULL;
+
+#define panic(fmt, ...) do { fprintf(stderr, "ERR: " fmt "\n", ##__VA_ARGS__); exit(1); } while(0)
+// #define SETERR(x) errormsg = errormsg != NULL ? errormsg : x;
+#define SETERR(x, ...) seterr("error(%d): " x, __LINE__, ##__VA_ARGS__)
+
+void seterr(const char *fmt, ...)
+{
+    int size = 0;
+    char *p = NULL;
+    va_list ap;
+
+    if (errormsg != NULL)
+        return;
+
+    /* Determine required size */
+    va_start(ap, fmt);
+    size = vsnprintf(p, size, fmt, ap);
+    va_end(ap);
+
+    if (size < 0)
+        panic("failed to determine size for error message");
+
+    size++;             /* For '\0' */
+    p = malloc(size); assert(p);
+    va_start(ap, fmt);
+    size = vsnprintf(p, size, fmt, ap);
+    va_end(ap);
+    if (size < 0) {
+        panic("vsnprintf failed");
+    }
+    errormsg = p;
+}
+
+
+
+#define TRY(err) do { int rc = (err); if (rc != Error_OK) return rc; } while (0)
 const Atom nil = { .type = AtomType_Nil };
+
+int listp(Atom expr)
+{
+    while (!nilp(expr)) {
+        if (!pairp(expr) && !closurep(expr))
+            return 0;
+        expr = cdr(expr);
+    }
+    return 1;
+}
 
 Atom cons(Atom carval, Atom cdrval)
 {
@@ -54,6 +127,9 @@ Atom cons(Atom carval, Atom cdrval)
     return p;
 }
 
+/*
+ * make_* routines
+ */
 Atom make_int(long x)
 {
     Atom a;
@@ -78,14 +154,36 @@ Atom make_sym(const char* s)
     while (!nilp(p)) {
         assert(p.type == AtomType_Pair);
         a = car(p);
-        if (!strcmp(tosym(a), s))
+        if (!strcmp(tosymbol(a), s))
             return a;
         p = cdr(p);
     }
     p.type = AtomType_Symbol;
-    tosym(p) = strdup(s);
+    tosymbol(p) = strdup(s);
     sym_table = cons(p, sym_table);
     return p;
+}
+
+int make_closure(Atom env, Atom args, Atom body, Atom* result)
+{
+    Atom p;
+
+    if (!listp(args) || !listp(body)) {
+        SETERR("args or body of closure not a list");
+        return Error_Syntax;
+    }
+
+    p = args;
+    while (!nilp(p)) {
+        if (!symbolp(car(p))) {
+            SETERR("expected symbol in parameters list: %s", typename(car(p)));
+            return Error_Type;
+        }
+        p = cdr(p);
+    }
+    *result = cons(env, cons(args, body));
+    result->type = AtomType_Closure;
+    return Error_OK;
 }
 
 Atom copy_list(Atom list)
@@ -129,31 +227,19 @@ void print_expr(Atom atom)
             putchar(')');
             break;
         case AtomType_Symbol:
-            printf("%s", tosym(atom));
+            printf("%s", tosymbol(atom));
             break;
         case AtomType_Integer:
-            printf("%ld", toint(atom));
+            printf("%ld", tointeger(atom));
             break;
         case AtomType_Builtin:
             printf("#<BUILTIN:%p>", tobuiltin(atom));
             break;
+        case AtomType_Closure:
+            printf("#<CLOSURE:%p>", atom.value.pair);
+            break;
     }
 }
-
-typedef enum {
-    Error_OK = 0,
-    Error_Syntax,
-    Error_Unbound,
-    Error_Args,
-    Error_Type,
-} Error;
-
-#define TRY(err) do { int rc = (err); if (rc != Error_OK) return rc; } while (0)
-
-int lex(const char* str, const char** start, const char** end);
-int parse_simple(const char* start, const char* end, Atom* result);
-int read_list(const char* start, const char** end, Atom* result);
-int read_expr(const char* input, const char** end, Atom* result);
 
 int lex(const char* str, const char** start, const char** end)
 {
@@ -164,6 +250,7 @@ int lex(const char* str, const char** start, const char** end)
     str += strspn(str, ws);
     if (*str == '\0') {
         *start = *end = NULL;
+        SETERR("found unexpected end-of-input");
         return Error_Syntax;
     }
 
@@ -201,6 +288,8 @@ int parse_simple(const char* start, const char* end, Atom* result)
     return Error_OK;
 }
 
+int read_expr(const char* input, const char** end, Atom* result);
+
 int read_list(const char* start, const char** end, Atom* result)
 {
     Atom p;
@@ -215,13 +304,17 @@ int read_list(const char* start, const char** end, Atom* result)
             return Error_OK;
         if (token[0] == '.' && *end - token == 1) { // TODO: check this 2nd condition
             /* Improper list */
-            if (nilp(p))
+            if (nilp(p)) {
+                SETERR("improper list found in list context");
                 return Error_Syntax;
+            }
             TRY(read_expr(*end, end, &item));
             cdr(p) = item;
             TRY(lex(*end, &token, end));
-            if (token[0] != ')')
+            if (token[0] != ')') {
+                SETERR("list missing closing paren");
                 return Error_Syntax;
+            }
             return Error_OK;
         }
 
@@ -239,18 +332,15 @@ int read_list(const char* start, const char** end, Atom* result)
 int read_expr(const char* input, const char** end, Atom* result)
 {
     const char* token;
-    Error err;
-
-    err = lex(input, &token, end);
-    if (err == Error_Syntax)
-        return err;
-
-    if (token[0] == '(')
+    TRY(lex(input, &token, end));
+    if (token[0] == '(') {
         return read_list(*end, end, result);
-    else if (token[0] == ')')
+    } else if (token[0] == ')') {
+        SETERR("expression list missing closing paren");
         return Error_Syntax;
-    else
+    } else {
         return parse_simple(token, *end, result);
+    }
 }
 
 Atom env_create(Atom parent) {
@@ -263,7 +353,7 @@ int env_get(Atom env, Atom symbol, Atom* result)
     Atom entries = cdr(env);
     while (!nilp(entries)) {
         Atom entry = car(entries);
-        if (tosym(car(entry)) == tosym(symbol)) {
+        if (tosymbol(car(entry)) == tosymbol(symbol)) {
             *result = cdr(entry);
             return Error_OK;
         }
@@ -282,7 +372,7 @@ int env_set(Atom env, Atom symbol, Atom value)
     Atom entries = cdr(env);
     while (!nilp(entries)) {
         Atom entry = car(entries);
-        if (tosym(car(entry)) == tosym(symbol)) {
+        if (tosymbol(car(entry)) == tosymbol(symbol)) {
             cdr(entry) = value;
             return Error_OK;
         }
@@ -293,49 +383,63 @@ int env_set(Atom env, Atom symbol, Atom value)
     return Error_OK;
 }
 
+int eval_expr(Atom expr, Atom env, Atom* result);
+
 int apply(Atom fn, Atom args, Atom* result)
 {
-    if (!builtinp(fn))
+    Atom env, params, body;
+
+    if (builtinp(fn))
+        return (*tobuiltin(fn))(args, result);
+    else if (!closurep(fn)) {
+        SETERR("tried to apply object that is not builtin or closure: %s", typename(fn));
         return Error_Type;
-    return (*tobuiltin(fn))(args, result);
-}
-
-int listp(Atom expr)
-{
-    while (!nilp(expr)) {
-        if (expr.type != AtomType_Pair)
-            return 0;
-        expr = cdr(expr);
     }
-    return 1;
-}
 
-Atom F_QUOTE;
-Atom F_DEFINE;
+    env = env_create(car(fn));
+    params = car(cdr(fn));
+    body = cdr(cdr(fn));
+
+    while (!nilp(params) && !nilp(args)) {
+        env_set(env, car(params), car(args));
+        params = cdr(params);
+        args   = cdr(args);
+    }
+    if (!nilp(params) && !nilp(args))
+        return Error_Args;
+
+    while (!nilp(body)) {
+        TRY(eval_expr(car(body), env, result));
+        body = cdr(body);
+    }
+
+    return Error_OK;
+}
 
 int symcmp(Atom a, Atom b) {
-    assert(symp(a));
-    assert(symp(b));
-    return tosym(a) == tosym(b);
+    assert(symbolp(a));
+    assert(symbolp(b));
+    return tosymbol(a) == tosymbol(b);
 }
 
 int eval_expr(Atom expr, Atom env, Atom* result)
 {
     Atom op, args, p;
 
-    if (symp(expr)) {
+    if (symbolp(expr)) {
         return env_get(env, expr, result);
     } else if (!pairp(expr)) {
         *result = expr;
         return Error_OK;
-    } else if (!listp(expr)) {
+    } else if (!listp(expr) /* && !closurep(expr) */) {
+        SETERR("expression is not symbol, pair, or list: %s", typename(expr));
         return Error_Syntax;
     }
 
     op = car(expr);
     args = cdr(expr);
 
-    if (symp(op)) {
+    if (symbolp(op)) {
         if (symcmp(op, F_QUOTE)) {
             // form ( <QUOTE> . ( <ATOM> . NIL ) )
             if (nilp(args) || !nilp(cdr(args)))
@@ -348,30 +452,35 @@ int eval_expr(Atom expr, Atom env, Atom* result)
             if (nilp(args) || nilp(cdr(args)) || !nilp(cdr(cdr(args))))
                 return Error_Args;
             sym = car(args);
-            if (!symp(sym))
+            if (!symbolp(sym)) {
+                SETERR("attempted to bind to non-symbol: %s", typename(sym));
                 return Error_Type;
+            }
             TRY(eval_expr(car(cdr(args)), env, &val));
             *result = sym;
             env_set(env, sym, val);
             return Error_OK;
-        } else {
-            /* Evaluate operator */
-            TRY(eval_expr(op, env, &op));
-
-            /* Evaluate arguments */
-            // TODO: why do I need to copy the list?
-            args = copy_list(args);
-            p = args;
-            while (!nilp(p)) {
-                TRY(eval_expr(car(p), env, &car(p)));
-                p = cdr(p);
-            }
-
-            return apply(op, args, result);
+        } else if (symcmp(op, F_LAMBDA)) {
+            // form: ( <LAMBDA> . ( (ARGS...) . ( (BODY...) . NIL ) ) )
+            if (nilp(args) || nilp(cdr(args)))
+                return Error_Args;
+            return make_closure(env, car(args), cdr(args), result);
         }
     }
 
-    return Error_Syntax;
+    /* Evaluate operator */
+    TRY(eval_expr(op, env, &op));
+
+    /* Evaluate arguments */
+    // TODO: why do I need to copy the list?
+    args = copy_list(args);
+    p = args;
+    while (!nilp(p)) {
+        TRY(eval_expr(car(p), env, &car(p)));
+        p = cdr(p);
+    }
+
+    return apply(op, args, result);
 }
 
 int builtin_car(Atom args, Atom* result)
@@ -429,9 +538,9 @@ int builtin_add(Atom args, Atom* result)
     int val = 0;
     while (!nilp(args)) {
         Atom a = car(args);
-        if (!intp(a))
+        if (!integerp(a))
             return Error_Args;
-        val += toint(a);
+        val += tointeger(a);
         args = cdr(args);
     }
     *result = make_int(val);
@@ -443,10 +552,10 @@ int builtin_add(Atom args, Atom* result)
 
     // a = car(args);
     // b = car(cdr(args));
-    // if (!intp(a) || !intp(b))
+    // if (!integerp(a) || !integerp(b))
     //     return Error_Type;
 
-    // *result = make_int(toint(a) + toint(b));
+    // *result = make_int(tointeger(a) + tointeger(b));
     // return Error_OK;
 }
 
@@ -458,8 +567,8 @@ int builtin_subtract(Atom args, Atom* result)
     }
 
     Atom a = car(args);
-    if (!intp(a)) return Error_Args;
-    int val = toint(a);
+    if (!integerp(a)) return Error_Args;
+    int val = tointeger(a);
     args = cdr(args);
     if (nilp(args)) {
         *result = make_int(-val);
@@ -468,8 +577,8 @@ int builtin_subtract(Atom args, Atom* result)
 
     while (!nilp(args)) {
         a = car(args);
-        if (!intp(a)) return Error_Args;
-        val -= toint(a);
+        if (!integerp(a)) return Error_Args;
+        val -= tointeger(a);
         args = cdr(args);
     }
 
@@ -482,9 +591,9 @@ int builtin_multiply(Atom args, Atom* result)
     int val = 1;
     while (!nilp(args)) {
         Atom a = car(args);
-        if (!intp(a))
+        if (!integerp(a))
             return Error_Args;
-        val *= toint(a);
+        val *= tointeger(a);
         args = cdr(args);
     }
     *result = make_int(val);
@@ -497,11 +606,12 @@ int builtin_divide(Atom args, Atom* result)
         *result = make_int(1);
         return Error_OK;
     }
-    if (!intp(car(args))) return Error_Args;
-    int val = toint(car(args));
+    if (!integerp(car(args)))
+        return Error_Args;
+    int val = tointeger(car(args));
     args = cdr(args);
     while (!nilp(args)) {
-        val /= toint(car(args));
+        val /= tointeger(car(args));
         args = cdr(args);
     }
     *result = make_int(val);
@@ -511,6 +621,7 @@ int builtin_divide(Atom args, Atom* result)
 Atom init() {
     F_QUOTE = make_sym("QUOTE");
     F_DEFINE = make_sym("DEFINE");
+    F_LAMBDA = make_sym("LAMBDA");
     Atom env = env_create(nil);
 
     env_set(env, make_sym("CAR"),  make_builtin(&builtin_car));
@@ -522,6 +633,15 @@ Atom init() {
     env_set(env, make_sym("/"),    make_builtin(&builtin_divide));
 
     return env;
+}
+
+void print_error(const char* msg)
+{
+    if (errormsg) {
+        printf("%s: %s\n", msg, errormsg);
+    } else {
+        printf("%s\n", msg);
+    }
 }
 
 void execute(const char* p, Atom env)
@@ -537,16 +657,16 @@ void execute(const char* p, Atom env)
             print_expr(result); putchar('\n');
             break;
         case Error_Syntax:
-            printf("syntax error\n");
+            print_error("syntax error");
             break;
         case Error_Unbound:
-            printf("error: symbol not bound\n");
+            print_error("unbound symbol error");
             break;
         case Error_Args:
-            printf("error: incorrect number of arguments\n");
+            print_error("argument error\n");
             break;
         case Error_Type:
-            printf("error: incorrect type\n");
+            print_error("incorrect type error");
             break;
     }
 }
@@ -607,9 +727,9 @@ int main(int argc, char** argv)
 
     Atom a = make_sym("FOO");
     Atom b = make_sym("FOO");
-    assert(tosym(a) == tosym(b));
+    assert(tosymbol(a) == tosymbol(b));
     Atom c = make_sym("BAR");
-    assert(tosym(a) != tosym(c));
+    assert(tosymbol(a) != tosymbol(c));
 
     //------------------------------------------------------------
     // Environment Tests
@@ -627,35 +747,35 @@ int main(int argc, char** argv)
     err = env_set(env, make_sym("FOO"), make_sym("BAR"));
     assert(err == Error_OK);
     err = env_get(env, make_sym("FOO"), &ret);
-    assert(tosym(ret) == tosym(make_sym("BAR")));
+    assert(tosymbol(ret) == tosymbol(make_sym("BAR")));
 
     // set value in parent + access it from child
     err = env_set(parent, make_sym("HELLO"), make_sym("WORLD"));
     assert(err == Error_OK);
     err = env_get(env, make_sym("HELLO"), &ret);
     assert(err == Error_OK);
-    assert(tosym(ret) == tosym(make_sym("WORLD")));
+    assert(tosymbol(ret) == tosymbol(make_sym("WORLD")));
 
     // set another value in parent + access it from child
     err = env_set(parent, make_sym("GOODBYE"), make_sym("SOMEONE"));
     assert(err == Error_OK);
     err = env_get(env, make_sym("GOODBYE"), &ret);
     assert(err == Error_OK);
-    assert(tosym(ret) == tosym(make_sym("SOMEONE")));
+    assert(tosymbol(ret) == tosymbol(make_sym("SOMEONE")));
 
     // set value in child that shadows parent + access it from child
     err = env_set(env, make_sym("GOODBYE"), make_sym("SOMEONE-ELSE"));
     assert(err == Error_OK);
     err = env_get(env, make_sym("GOODBYE"), &ret);
     assert(err == Error_OK);
-    assert(tosym(ret) == tosym(make_sym("SOMEONE-ELSE")));
+    assert(tosymbol(ret) == tosymbol(make_sym("SOMEONE-ELSE")));
 
     // replace value in parent + access it from child
     err = env_set(parent, make_sym("HELLO"), make_sym("VENUS"));
     assert(err == Error_OK);
     err = env_get(env, make_sym("HELLO"), &ret);
     assert(err == Error_OK);
-    assert(tosym(ret) == tosym(make_sym("VENUS")));
+    assert(tosymbol(ret) == tosymbol(make_sym("VENUS")));
 
     printf("Passed.\n");
 #endif

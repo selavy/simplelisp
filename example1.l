@@ -1,4 +1,3 @@
-(*)
-(/)
-(* 3 3 3)
-(/ 27 3 3)
+(define square (lambda (x) (* x x)))
+(square 3)
+(square 4)
