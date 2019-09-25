@@ -732,6 +732,44 @@ int builtin_numgte(Atom args, Atom* result)
     return Error_OK;
 }
 
+char* slurp(const char* filename)
+{
+    /* for simplicity just read entire file into one giant buffer */
+    FILE* file;
+    char* buf;
+    long len;
+    file = fopen(filename, "r");
+    if (!file) return NULL;
+    fseek(file, 0, SEEK_END);
+    len = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    buf = malloc(len);
+    fread(buf, 1, len, file);
+    fclose(file);
+    return buf;
+}
+
+void load_file(Atom env, const char* filename)
+{
+    char* text = slurp(filename);
+    if (text) {
+        const char* p = text;
+        Atom expr;
+        while (read_expr(p, &p, &expr) == Error_OK) {
+            Atom result;
+            Error err = eval_expr(expr, env, &result);
+            if (err) {
+                printf("Error in expression:\n\t");
+                print_expr(expr); putchar('\n');
+            } else {
+                print_expr(result); putchar('\n');
+            }
+        }
+
+    }
+    free(text);
+}
+
 Atom init() {
     F_QUOTE = make_sym("QUOTE");
     F_DEFINE = make_sym("DEFINE");
@@ -755,6 +793,9 @@ Atom init() {
 
     env_set(env, make_sym("T"), make_sym("T"));
     env_set(env, make_sym("F"), make_sym("F"));
+
+    // TODO: make smarter about finding library
+    load_file(env, "library.lisp");
 
     return env;
 }
