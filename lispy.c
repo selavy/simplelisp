@@ -732,6 +732,18 @@ int builtin_numgte(Atom args, Atom* result)
     return Error_OK;
 }
 
+int builtin_apply(Atom args, Atom* result)
+{
+    Atom fn;
+    if (list_length(args) != 2)
+        return Error_Args;
+
+    fn = car(args);
+    args = car(cdr(args));
+    CHECKTYPE(args, listp);
+    return apply(fn, args, result);
+}
+
 char* slurp(const char* filename)
 {
     /* for simplicity just read entire file into one giant buffer */
