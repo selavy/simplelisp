@@ -56,6 +56,7 @@ struct Pair {
     struct Atom atom[2];
 };
 
+Atom F_IF;
 Atom F_QUOTE;
 Atom F_DEFINE;
 Atom F_LAMBDA;
@@ -115,6 +116,17 @@ int listp(Atom expr)
         expr = cdr(expr);
     }
     return 1;
+}
+
+int list_length(Atom list)
+{
+    int result = 0;
+    while (!nilp(list)) {
+        assert(pairp(list));
+        ++result;
+        list = cdr(list);
+    }
+    return result;
 }
 
 Atom cons(Atom carval, Atom cdrval)
@@ -360,8 +372,10 @@ int env_get(Atom env, Atom symbol, Atom* result)
         entries = cdr(entries);
     }
 
-    if (nilp(parent))
+    if (nilp(parent)) {
+        SETERR("%s", tosymbol(symbol));
         return Error_Unbound;
+    }
 
     return env_get(parent, symbol, result);
 }
@@ -440,7 +454,15 @@ int eval_expr(Atom expr, Atom env, Atom* result)
     args = cdr(expr);
 
     if (symbolp(op)) {
-        if (symcmp(op, F_QUOTE)) {
+        if (symcmp(op, F_IF)) {
+            // form ( <IF> . ( <TEST> . ( <TRUE-EXPR> . ( <FALSE-EXPRE> . NIL ) ) ) )
+            Atom cond, val;
+            if (list_length(args) != 3)
+                return Error_Args;
+            TRY(eval_expr(car(args), env, &cond));
+            val = nilp(cond) ? car(cdr(cdr(args))) : car(cdr(args));
+            return eval_expr(val, env, result);
+        } else if (symcmp(op, F_QUOTE)) {
             // form ( <QUOTE> . ( <ATOM> . NIL ) )
             if (nilp(args) || !nilp(cdr(args)))
                 return Error_Args;
@@ -511,17 +533,6 @@ int builtin_cdr(Atom args, Atom* result)
         *result = cdr(car(args));
 
     return Error_OK;
-}
-
-int list_length(Atom list)
-{
-    int result = 0;
-    while (!nilp(list)) {
-        assert(pairp(list));
-        ++result;
-        list = cdr(list);
-    }
-    return result;
 }
 
 int builtin_cons(Atom args, Atom* result)
@@ -618,10 +629,71 @@ int builtin_divide(Atom args, Atom* result)
     return Error_OK;
 }
 
+int builtin_numeq(Atom args, Atom* result)
+{
+    if (list_length(args) != 2)
+        return Error_Args;
+    Atom a = car(args);
+    Atom b = car(cdr(args));
+    if (!integerp(a) && !integerp(b))
+        return Error_Type;
+    *result = (tointeger(a) == tointeger(b)) ? make_sym("T") : nil;
+    return Error_OK;
+}
+
+int builtin_numlt(Atom args, Atom* result)
+{
+    if (list_length(args) != 2)
+        return Error_Args;
+    Atom a = car(args);
+    Atom b = car(cdr(args));
+    if (!integerp(a) && !integerp(b))
+        return Error_Type;
+    *result = (tointeger(a) < tointeger(b)) ? make_sym("T") : nil;
+    return Error_OK;
+}
+
+int builtin_numgt(Atom args, Atom* result)
+{
+    if (list_length(args) != 2)
+        return Error_Args;
+    Atom a = car(args);
+    Atom b = car(cdr(args));
+    if (!integerp(a) && !integerp(b))
+        return Error_Type;
+    *result = (tointeger(a) > tointeger(b)) ? make_sym("T") : nil;
+    return Error_OK;
+}
+
+int builtin_numlte(Atom args, Atom* result)
+{
+    if (list_length(args) != 2)
+        return Error_Args;
+    Atom a = car(args);
+    Atom b = car(cdr(args));
+    if (!integerp(a) && !integerp(b))
+        return Error_Type;
+    *result = (tointeger(a) <= tointeger(b)) ? make_sym("T") : nil;
+    return Error_OK;
+}
+
+int builtin_numgte(Atom args, Atom* result)
+{
+    if (list_length(args) != 2)
+        return Error_Args;
+    Atom a = car(args);
+    Atom b = car(cdr(args));
+    if (!integerp(a) && !integerp(b))
+        return Error_Type;
+    *result = (tointeger(a) >= tointeger(b)) ? make_sym("T") : nil;
+    return Error_OK;
+}
+
 Atom init() {
     F_QUOTE = make_sym("QUOTE");
     F_DEFINE = make_sym("DEFINE");
     F_LAMBDA = make_sym("LAMBDA");
+    F_IF = make_sym("IF");
     Atom env = env_create(nil);
 
     env_set(env, make_sym("CAR"),  make_builtin(&builtin_car));
@@ -631,6 +703,14 @@ Atom init() {
     env_set(env, make_sym("-"),    make_builtin(&builtin_subtract));
     env_set(env, make_sym("*"),    make_builtin(&builtin_multiply));
     env_set(env, make_sym("/"),    make_builtin(&builtin_divide));
+    env_set(env, make_sym("="),    make_builtin(&builtin_numeq));
+    env_set(env, make_sym("<"),    make_builtin(&builtin_numlt));
+    env_set(env, make_sym(">"),    make_builtin(&builtin_numgt));
+    env_set(env, make_sym("<="),    make_builtin(&builtin_numlte));
+    env_set(env, make_sym(">="),    make_builtin(&builtin_numgte));
+
+    env_set(env, make_sym("T"), make_sym("T"));
+    env_set(env, make_sym("F"), make_sym("F"));
 
     return env;
 }
@@ -698,7 +778,7 @@ void from_file(const char* filename)
     }
     while ((nread = getline(&line, &len, stream)) != -1) {
         line[nread-1] = '\0';
-        // printf("Read line: '%s'\n", line);
+        printf("%s\n> ", line);
         execute(line, env);
     }
     free(line);
