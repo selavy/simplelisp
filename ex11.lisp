@@ -15,3 +15,5 @@ quasiquote (0 (unquote-splicing (list 1 2)) 4))
 
 (define bar 2)
 (quasiquote (foo (unquote bar) baz))
+
+(quasiquote (0 (unquote-splicing 1)))
