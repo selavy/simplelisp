@@ -456,6 +456,7 @@ int apply(Atom fn, Atom args, Atom* result)
     params = car(cdr(fn));
     body = cdr(cdr(fn));
 
+    // TODO: set unbound parameters to nil?
     while (!nilp(params) && !nilp(args)) {
         if (symbolp(params)) {
             env_set(env, params, args);
@@ -636,16 +637,27 @@ int builtin_cons(Atom args, Atom* result)
 
 int builtin_add(Atom args, Atom* result)
 {
-    int val = 0;
-    while (!nilp(args)) {
-        Atom a = car(args);
-        if (!integerp(a))
-            return Error_Args;
-        val += tointeger(a);
-        args = cdr(args);
-    }
-    *result = make_int(val);
+    Atom a, b;
+    if (list_length(args) != 2)
+        return Error_Args;
+    a = car(args);
+    b = car(cdr(args));
+    if (!integerp(a) || !integerp(b))
+        return Error_Args;
+
+    *result = make_int(tointeger(a) + tointeger(b));
     return Error_OK;
+
+    // int val = 0;
+    // while (!nilp(args)) {
+    //     Atom a = car(args);
+    //     if (!integerp(a))
+    //         return Error_Args;
+    //     val += tointeger(a);
+    //     args = cdr(args);
+    // }
+    // *result = make_int(val);
+    // return Error_OK;
 }
 
 int builtin_subtract(Atom args, Atom* result)
