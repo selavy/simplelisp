@@ -75,8 +75,6 @@ typedef enum {
     Error_Unbound,
     Error_Args,
     Error_Type,
-    // TEMP: this is a giant hack to make comments work at the end of a file
-    Error_EOF,
 } Error;
 
 const char* ErrorNames[] = {
@@ -98,11 +96,8 @@ int         errorlinum = -1;
     return err; \
 } while(0)
 
-#define THROW2(err) THROW(err, "")
-
 #define CHECKTYPE(x, pred) do { if (!pred(x)) { panic("type error"); return Error_Type; } } while (0)
 #define CHECKARGN(args, n) do { if (list_length(args) != n) { return Error_Args; } } while (0)
-
 
 void seterr(int linum, const char *fmt, ...)
 {
@@ -133,7 +128,7 @@ void seterr(int linum, const char *fmt, ...)
     errorlinum = linum;
 }
 
-#define TRY(err) do { int rc = (err); if (rc != Error_OK) /* THROW2(rc);*/ return rc; } while (0)
+#define TRY(err) do { int rc = (err); if (rc != Error_OK) return rc; } while (0)
 const Atom nil = { .type = AtomType_Nil };
 
 int listp(Atom expr)
@@ -292,7 +287,7 @@ int lex(const char* str, const char** start, const char** end)
         str = strchr(str, '\n');
         if (str == NULL) {
             *start = *end = NULL;
-            return Error_EOF;
+            return Error_Syntax;
         }
         str += strspn(str, ws);
     }
@@ -862,9 +857,7 @@ void load_file(Atom env, const char* filename)
         while (read_expr(p, &p, &expr) == Error_OK) {
             Atom result;
             Error err = eval_expr(expr, env, &result);
-            if (err == Error_EOF) {
-                // nothing
-            } else if (err != Error_OK) {
+            if (err != Error_OK) {
                 switch (err) {
                     case Error_OK:
                         print_expr(result); putchar('\n');
@@ -880,8 +873,6 @@ void load_file(Atom env, const char* filename)
                         break;
                     case Error_Type:
                         print_error("incorrect type error");
-                        break;
-                    case Error_EOF:
                         break;
                 }
                 printf("Error in expression:\n\t");
@@ -959,8 +950,6 @@ void execute(const char* p, Atom env)
         case Error_Type:
             print_error("incorrect type error");
             break;
-        case Error_EOF:
-            break;
     }
 }
 
@@ -972,7 +961,10 @@ void repl()
         if (strlen(buf) > 0) {
             add_history(buf);
         }
-        execute(buf, env);
+        const char* input = buf + strspn(buf, " \t\n");
+        if (input[0] != '\0') {
+            execute(input, env);
+        }
         free(buf);
     }
 }
@@ -991,8 +983,11 @@ void from_file(const char* filename)
     }
     while ((nread = getline(&line, &len, stream)) != -1) {
         line[nread-1] = '\0';
-        printf("%s\n> ", line);
-        execute(line, env);
+        const char* input = line + strspn(line, " \t\n");
+        if (input[0] != '\0') {
+            printf("%s\n> ", input);
+            execute(input, env);
+        }
     }
     free(line);
     fclose(stream);
