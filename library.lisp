@@ -35,3 +35,29 @@
           (apply map  (cons proc
                             (unary-map cdr arg-lists))))
     nil))
+
+(define (append a b) (foldr cons b a))
+
+(define (caar x) (car (car x)))
+
+(define (cadr x) (car (cdr x)))
+
+(defmacro (quasiquote x)
+  (if (pair? x)
+      (if (eq? (car x) 'unquote)
+          (cadr x)
+          (if (and (pair? (car x)) (eq? (caar x) 'unquote-splicing))
+              (list 'append
+                    (cadr (car x))
+                    (list 'quasiquote (cdr x)))
+              (list 'cons
+                    (list 'quasiquote (car x))
+                    (list 'quasiquote (cdr x)))))
+      (list 'quote x)))
+
+;; (defmacro (ignore x)
+;;   (quasiquote (quote (unquote x))))
+(defmacro (ignore X)
+  `(quote ,X))
+
+(ignore foo)

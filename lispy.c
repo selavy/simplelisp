@@ -64,6 +64,10 @@ Atom F_QUOTE;
 Atom F_DEFINE;
 Atom F_LAMBDA;
 Atom F_DEFMACRO;
+Atom F_QUASIQUOTE;
+Atom F_UNQUOTE_SPLICING;
+Atom F_UNQUOTE;
+Atom F_AND;
 
 typedef enum {
     Error_OK = 0,
@@ -71,18 +75,36 @@ typedef enum {
     Error_Unbound,
     Error_Args,
     Error_Type,
+    // TEMP: this is a giant hack to make comments work at the end of a file
+    Error_EOF,
 } Error;
 
+const char* ErrorNames[] = {
+    "",
+    "syntax error",
+    "unbound symbol",
+    "argument error",
+    "type error",
+};
+
 const char* errormsg = NULL;
+int         errorlinum = -1;
 
 #define panic(fmt, ...) do { fprintf(stderr, "ERR: " fmt "\n", ##__VA_ARGS__); exit(1); } while(0)
-// #define SETERR(x) errormsg = errormsg != NULL ? errormsg : x;
-#define SETERR(x, ...) seterr("error(%d): " x, __LINE__, ##__VA_ARGS__)
+#define SETERR(x, ...) seterr(__LINE__, "error(%d): " x, __LINE__, ##__VA_ARGS__)
 
-#define CHECKTYPE(x, pred) do { if (!pred(x)) { return Error_Type; } } while (0)
+#define THROW(err, msg, ...) do { \
+    seterr(__LINE__, "%s [%d]:" msg, ErrorNames[err], __LINE__, ##__VA_ARGS__); \
+    return err; \
+} while(0)
+
+#define THROW2(err) THROW(err, "")
+
+#define CHECKTYPE(x, pred) do { if (!pred(x)) { panic("type error"); return Error_Type; } } while (0)
 #define CHECKARGN(args, n) do { if (list_length(args) != n) { return Error_Args; } } while (0)
 
-void seterr(const char *fmt, ...)
+
+void seterr(int linum, const char *fmt, ...)
 {
     int size = 0;
     char *p = NULL;
@@ -108,11 +130,10 @@ void seterr(const char *fmt, ...)
         panic("vsnprintf failed");
     }
     errormsg = p;
+    errorlinum = linum;
 }
 
-
-
-#define TRY(err) do { int rc = (err); if (rc != Error_OK) return rc; } while (0)
+#define TRY(err) do { int rc = (err); if (rc != Error_OK) /* THROW2(rc);*/ return rc; } while (0)
 const Atom nil = { .type = AtomType_Nil };
 
 int listp(Atom expr)
@@ -173,8 +194,9 @@ Atom make_sym(const char* s)
     while (!nilp(p)) {
         assert(p.type == AtomType_Pair);
         a = car(p);
-        if (!strcmp(tosymbol(a), s))
+        if (!strcmp(tosymbol(a), s)) {
             return a;
+        }
         p = cdr(p);
     }
     p.type = AtomType_Symbol;
@@ -186,16 +208,14 @@ Atom make_sym(const char* s)
 int make_closure(Atom env, Atom args, Atom body, Atom* result)
 {
     Atom p;
-
-    if (!listp(body))
+    if (!listp(body)) {
         return Error_Syntax;
-
+    }
     p = args;
-    while (!nilp(p)) {
-        if (symbolp(p))
-            break;
-        else if (!pairp(p) || !symbolp(car(p)))
+    while (!nilp(p) && !symbolp(p)) {
+        if (!pairp(p) || !symbolp(car(p))) {
             return Error_Type;
+        }
         p = cdr(p);
     }
     *result = cons(env, cons(args, body));
@@ -265,30 +285,28 @@ int lex(const char* str, const char** start, const char** end)
 {
     const char* const ws     = " \t\n";
     const char* const delim  = "() \t\n";
-    const char* const prefix = "()\'";
+    const char* const prefix = "()\'`";
 
-    for (;;) {
-        str += strspn(str, ws);
-        if (*str == '\0') {
-            *start = *end = NULL;
-            SETERR("found unexpected end-of-input");
-            return Error_Syntax;
-        }
-        if (str[0] != ';') {
-            break;
-        }
+    str += strspn(str, ws);
+    while (*str == ';') {
         str = strchr(str, '\n');
-        ++str;
-        if (*str == '\0') {
+        if (str == NULL) {
             *start = *end = NULL;
-            SETERR("found unexpected end-of-input");
-            return Error_Syntax;
+            return Error_EOF;
         }
+        str += strspn(str, ws);
+    }
+    if (*str == '\0') {
+        *start = *end = NULL;
+        SETERR("found unexpected end-of-input");
+        return Error_Syntax;
     }
 
     *start = str;
     if (strchr(prefix, *str) != NULL)
         *end = str + 1;
+    else if (str[0] == ',')
+        *end = str + (str[1] == '@' ? 2 : 1);
     else
         *end = str + strcspn(str, delim);
 
@@ -312,6 +330,7 @@ int parse_simple(const char* start, const char* end, Atom* result)
     p = buf;
     while (start != end)
         *p++ = toupper(*start++);
+    *p = '\0';
     if (!strcmp(buf, "NIL"))
         *result = nil;
     else
@@ -373,6 +392,13 @@ int read_expr(const char* input, const char** end, Atom* result)
     } else if (token[0] == '\'') {
         *result = cons(F_QUOTE, cons(nil, nil));
         return read_expr(*end, end, &car(cdr(*result)));
+    } else if (token[0] == '`') {
+        *result = cons(F_QUASIQUOTE, cons(nil, nil));
+        return read_expr(*end, end, &car(cdr(*result)));
+    } else if (token[0] == ',') {
+        Atom sym = token[1] == '@' ? F_UNQUOTE_SPLICING : F_UNQUOTE;
+        *result = cons(sym, cons(nil, nil));
+        return read_expr(*end, end, &car(cdr(*result)));
     } else {
         return parse_simple(token, *end, result);
     }
@@ -394,12 +420,10 @@ int env_get(Atom env, Atom symbol, Atom* result)
         }
         entries = cdr(entries);
     }
-
     if (nilp(parent)) {
         SETERR("%s", tosymbol(symbol));
         return Error_Unbound;
     }
-
     return env_get(parent, symbol, result);
 }
 
@@ -489,6 +513,22 @@ int eval_expr(Atom expr, Atom env, Atom* result)
             TRY(eval_expr(car(args), env, &cond));
             val = nilp(cond) ? car(cdr(cdr(args))) : car(cdr(args));
             return eval_expr(val, env, result);
+        } else if (symcmp(op, F_AND)) {
+            // form ( <AND> <ARGS>... )
+            if (nilp(args))
+                return Error_Args;
+            Atom cond;
+            while (!nilp(args)) {
+                assert(pairp(args));
+                TRY(eval_expr(car(args), env, &cond));
+                if (nilp(cond)) {
+                    *result = nil;
+                    return Error_OK;
+                }
+                args = cdr(args);
+            }
+            *result = make_int(1);
+            return Error_OK;
         } else if (symcmp(op, F_QUOTE)) {
             // form ( <QUOTE> . ( <ATOM> . NIL ) )
             CHECKARGN(args, 1);
@@ -528,8 +568,10 @@ int eval_expr(Atom expr, Atom env, Atom* result)
             if (!pairp(car(args)))
                 return Error_Syntax;
             name = car(car(args));
-            if (!symbolp(name))
+            if (!symbolp(name)) {
+                SETERR("expected symbol for name of macro: %s", typename(name));
                 return Error_Type;
+            }
             TRY(make_closure(env, cdr(car(args)), cdr(args), &macro));
             macro.type = AtomType_Macro;
             *result = name;
@@ -562,31 +604,29 @@ int eval_expr(Atom expr, Atom env, Atom* result)
 
 int builtin_car(Atom args, Atom* result)
 {
-    if (nilp(args) || !nilp(cdr(args)))
+    if (nilp(args) || !nilp(cdr(args))) {
         return Error_Args;
-
-    if (nilp(car(args)))
+    } else if (nilp(car(args))) {
         *result = nil;
-    else if (!pairp(car(args)))
+    } else if (!pairp(car(args))) {
         return Error_Type;
-    else
+    } else {
         *result = car(car(args));
-
+    }
     return Error_OK;
 }
 
 int builtin_cdr(Atom args, Atom* result)
 {
-    if (nilp(args) || !nilp(cdr(args)))
+    if (nilp(args) || !nilp(cdr(args))) {
         return Error_Args;
-
-    if (nilp(car(args)))
+    } else if (nilp(car(args))) {
         *result = nil;
-    else if (!pairp(car(args)))
+    } else if (!pairp(car(args))) {
         return Error_Type;
-    else
+    } else {
         *result = cdr(car(args));
-
+    }
     return Error_OK;
 }
 
@@ -611,18 +651,6 @@ int builtin_add(Atom args, Atom* result)
     }
     *result = make_int(val);
     return Error_OK;
-
-    // Atom a, b;
-    // if (nilp(args) || list_length(args) != 2)
-    //     return Error_Args;
-
-    // a = car(args);
-    // b = car(cdr(args));
-    // if (!integerp(a) || !integerp(b))
-    //     return Error_Type;
-
-    // *result = make_int(tointeger(a) + tointeger(b));
-    // return Error_OK;
 }
 
 int builtin_subtract(Atom args, Atom* result)
@@ -690,8 +718,9 @@ int builtin_numeq(Atom args, Atom* result)
         return Error_Args;
     Atom a = car(args);
     Atom b = car(cdr(args));
-    if (!integerp(a) && !integerp(b))
+    if (!integerp(a) && !integerp(b)) {
         return Error_Type;
+    }
     *result = (tointeger(a) == tointeger(b)) ? make_sym("T") : nil;
     return Error_OK;
 }
@@ -702,8 +731,9 @@ int builtin_numlt(Atom args, Atom* result)
         return Error_Args;
     Atom a = car(args);
     Atom b = car(cdr(args));
-    if (!integerp(a) && !integerp(b))
+    if (!integerp(a) && !integerp(b)) {
         return Error_Type;
+    }
     *result = (tointeger(a) < tointeger(b)) ? make_sym("T") : nil;
     return Error_OK;
 }
@@ -714,8 +744,9 @@ int builtin_numgt(Atom args, Atom* result)
         return Error_Args;
     Atom a = car(args);
     Atom b = car(cdr(args));
-    if (!integerp(a) && !integerp(b))
+    if (!integerp(a) && !integerp(b)) {
         return Error_Type;
+    }
     *result = (tointeger(a) > tointeger(b)) ? make_sym("T") : nil;
     return Error_OK;
 }
@@ -813,6 +844,15 @@ char* slurp(const char* filename)
     return buf;
 }
 
+void print_error(const char* msg)
+{
+    if (errormsg) {
+        printf("%s: %s (%d)\n", msg, errormsg, errorlinum);
+    } else {
+        printf("%s\n", msg);
+    }
+}
+
 void load_file(Atom env, const char* filename)
 {
     char* text = slurp(filename);
@@ -822,25 +862,52 @@ void load_file(Atom env, const char* filename)
         while (read_expr(p, &p, &expr) == Error_OK) {
             Atom result;
             Error err = eval_expr(expr, env, &result);
-            if (err) {
+            if (err == Error_EOF) {
+                // nothing
+            } else if (err != Error_OK) {
+                switch (err) {
+                    case Error_OK:
+                        print_expr(result); putchar('\n');
+                        break;
+                    case Error_Syntax:
+                        print_error("syntax error");
+                        break;
+                    case Error_Unbound:
+                        print_error("unbound symbol error");
+                        break;
+                    case Error_Args:
+                        print_error("argument error\n");
+                        break;
+                    case Error_Type:
+                        print_error("incorrect type error");
+                        break;
+                    case Error_EOF:
+                        break;
+                }
                 printf("Error in expression:\n\t");
                 print_expr(expr); putchar('\n');
             } else {
+                assert(err == Error_OK);
                 print_expr(result); putchar('\n');
             }
         }
-        errormsg = NULL;
-
+        errormsg   = NULL;
+        errorlinum = -1;
     }
     free(text);
 }
 
 Atom init() {
-    F_QUOTE = make_sym("QUOTE");
-    F_DEFINE = make_sym("DEFINE");
-    F_LAMBDA = make_sym("LAMBDA");
-    F_IF = make_sym("IF");
-    F_DEFMACRO = make_sym("DEFMACRO");
+    F_QUOTE            = make_sym("QUOTE");
+    F_DEFINE           = make_sym("DEFINE");
+    F_LAMBDA           = make_sym("LAMBDA");
+    F_IF               = make_sym("IF");
+    F_DEFMACRO         = make_sym("DEFMACRO");
+    F_QUASIQUOTE       = make_sym("QUASIQUOTE");
+    F_UNQUOTE_SPLICING = make_sym("UNQUOTE-SPLICING");
+    F_UNQUOTE          = make_sym("UNQUOTE");
+    F_AND              = make_sym("AND");
+
     Atom env = env_create(nil);
 
     env_set(env, make_sym("CAR"),   make_builtin(&builtin_car));
@@ -868,15 +935,6 @@ Atom init() {
     return env;
 }
 
-void print_error(const char* msg)
-{
-    if (errormsg) {
-        printf("%s: %s\n", msg, errormsg);
-    } else {
-        printf("%s\n", msg);
-    }
-}
-
 void execute(const char* p, Atom env)
 {
     Error err;
@@ -900,6 +958,8 @@ void execute(const char* p, Atom env)
             break;
         case Error_Type:
             print_error("incorrect type error");
+            break;
+        case Error_EOF:
             break;
     }
 }
@@ -940,80 +1000,6 @@ void from_file(const char* filename)
 
 int main(int argc, char** argv)
 {
-#if RUN_TESTS
-    print_expr(make_int(42)); putchar('\n');
-    print_expr(make_sym("FOO")); putchar('\n');
-    print_expr(cons(make_sym("X"), make_sym("Y"))); putchar('\n');
-    print_expr(
-        cons(
-            make_int(1),
-            cons(
-                make_int(2),
-                cons(
-                    make_int(3),
-                    nil
-                )
-            )
-        )
-    );
-    putchar('\n');
-
-    Atom a = make_sym("FOO");
-    Atom b = make_sym("FOO");
-    assert(tosymbol(a) == tosymbol(b));
-    Atom c = make_sym("BAR");
-    assert(tosymbol(a) != tosymbol(c));
-
-    //------------------------------------------------------------
-    // Environment Tests
-    //------------------------------------------------------------
-    Atom parent = cons(nil, nil);
-    Atom env    = cons(parent, nil);
-    Error err;
-    Atom ret;
-
-    // find unbound symbol
-    err = env_get(env, make_sym("FOO"), &ret);
-    assert(err == Error_Unbound);
-
-    // set value in child + access it
-    err = env_set(env, make_sym("FOO"), make_sym("BAR"));
-    assert(err == Error_OK);
-    err = env_get(env, make_sym("FOO"), &ret);
-    assert(tosymbol(ret) == tosymbol(make_sym("BAR")));
-
-    // set value in parent + access it from child
-    err = env_set(parent, make_sym("HELLO"), make_sym("WORLD"));
-    assert(err == Error_OK);
-    err = env_get(env, make_sym("HELLO"), &ret);
-    assert(err == Error_OK);
-    assert(tosymbol(ret) == tosymbol(make_sym("WORLD")));
-
-    // set another value in parent + access it from child
-    err = env_set(parent, make_sym("GOODBYE"), make_sym("SOMEONE"));
-    assert(err == Error_OK);
-    err = env_get(env, make_sym("GOODBYE"), &ret);
-    assert(err == Error_OK);
-    assert(tosymbol(ret) == tosymbol(make_sym("SOMEONE")));
-
-    // set value in child that shadows parent + access it from child
-    err = env_set(env, make_sym("GOODBYE"), make_sym("SOMEONE-ELSE"));
-    assert(err == Error_OK);
-    err = env_get(env, make_sym("GOODBYE"), &ret);
-    assert(err == Error_OK);
-    assert(tosymbol(ret) == tosymbol(make_sym("SOMEONE-ELSE")));
-
-    // replace value in parent + access it from child
-    err = env_set(parent, make_sym("HELLO"), make_sym("VENUS"));
-    assert(err == Error_OK);
-    err = env_get(env, make_sym("HELLO"), &ret);
-    assert(err == Error_OK);
-    assert(tosymbol(ret) == tosymbol(make_sym("VENUS")));
-
-    printf("Passed.\n");
-#endif
-    // return 0;
-
     if (argc > 2) {
         fprintf(stderr, "Usage: %s [FILE]\n", argv[0]);
         exit(0);
@@ -1022,6 +1008,5 @@ int main(int argc, char** argv)
     } else {
         repl();
     }
-
     return 0;
 }
