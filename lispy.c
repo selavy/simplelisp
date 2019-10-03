@@ -4,6 +4,7 @@
 #include <assert.h>
 #include <ctype.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <readline/readline.h>
 #include <readline/history.h>
 
@@ -58,6 +59,49 @@ const char* typename(Atom p) { return TypeNames[p.type]; }
 struct Pair {
     struct Atom atom[2];
 };
+
+struct Allocation {
+    struct Pair        pair;
+    int                mark : 1;
+    struct Allocation* next;
+};
+struct Allocation* global_allocations = NULL;
+
+Atom sym_table = { .type = AtomType_Nil };
+
+void gc_mark(Atom root)
+{
+    struct Allocation* a;
+    if (!pairp(root) && !closurep(root) && !macrop(root))
+        return;
+    a = (struct Allocation*)((char *)root.value.pair - offsetof(struct Allocation, pair));
+    if (a->mark)
+        return;
+    a->mark = 1;
+    gc_mark(car(root));
+    gc_mark(cdr(root));
+}
+
+void gc()
+{
+    struct Allocation* a, **p;
+    gc_mark(sym_table);
+    /* Free unmarked allocations */
+    p = &global_allocations;
+    while (*p != NULL) {
+        a = *p;
+        if (!a->mark) {
+            *p = a->next;
+            free(a);
+        } else {
+            p = &a->next;
+        }
+    }
+    /* Clear marks */
+    for (a = global_allocations; a != NULL; a = a->next) {
+        a->mark = 0;
+    }
+}
 
 Atom F_IF;
 Atom F_QUOTE;
@@ -159,12 +203,23 @@ int list_length_safe(Atom list)
 
 Atom cons(Atom carval, Atom cdrval)
 {
+    struct Allocation* a;
     Atom p;
+    a = malloc(sizeof(struct Allocation));
+    a->mark = 0;
+    a->next = global_allocations;
     p.type = AtomType_Pair;
-    p.value.pair = malloc(sizeof(struct Pair));
+    p.value.pair = &a->pair;
     car(p) = carval;
     cdr(p) = cdrval;
     return p;
+
+    // Atom p;
+    // p.type = AtomType_Pair;
+    // p.value.pair = malloc(sizeof(struct Pair));
+    // car(p) = carval;
+    // cdr(p) = cdrval;
+    // return p;
 }
 
 /*
@@ -204,8 +259,6 @@ const char* get_builtin_name(Atom builtin)
     }
     return "unknown builtin";
 }
-
-Atom sym_table = { .type = AtomType_Nil };
 
 Atom make_sym(const char* s)
 {
@@ -498,6 +551,7 @@ void list_reverse(Atom* list)
 
 Atom make_frame(Atom parent, Atom env, Atom tail)
 {
+    // stack frame has form: (parent env evaluated-op (pending-arg...) (evaluated-arg...) (body...))
     return cons(parent,
             cons(env,
             cons(nil, /* op */
@@ -548,7 +602,6 @@ int eval_do_bind(Atom* stack, Atom* expr, Atom* env)
     list_set(*stack, FRAME_BODY, body);
 
     while (!nilp(params)) {
-        // REVISIT: why does this ever happen
         if (symbolp(params)) {
             env_set(*env, params, args);
             args = nil;
@@ -556,7 +609,6 @@ int eval_do_bind(Atom* stack, Atom* expr, Atom* env)
         }
         if (nilp(args)) {
             THROW(Error_Args, "too few arguments passed to function");
-            // return Error_Args;
         }
         env_set(*env, car(params), car(args));
         params = cdr(params);
@@ -565,7 +617,6 @@ int eval_do_bind(Atom* stack, Atom* expr, Atom* env)
 
     if (!nilp(args)) {
         THROW(Error_Args, "too many arguments passed to function.");
-        // return Error_Args;
     }
 
     list_set(*stack, FRAME_ARGS, nil);
@@ -590,11 +641,9 @@ int eval_do_apply(Atom* stack, Atom* expr, Atom* env, Atom* result)
         args = car(cdr(args));
         if (!listp(args)) {
             THROW(Error_Syntax, "argument must be of type list");
-            // return Error_Syntax;
         }
         list_set(*stack, FRAME_OP, op);
         list_set(*stack, FRAME_ARGS, args);
-        printf("eval_do_apply STACK FRAME[%d]: op = ", __LINE__); print_expr(op); putchar('\n'); // TEMP TEMP
     }
 
     if (builtinp(op)) {
@@ -604,10 +653,7 @@ int eval_do_apply(Atom* stack, Atom* expr, Atom* env, Atom* result)
     } else if (closurep(op)) {
         return eval_do_bind(stack, expr, env);
     } else {
-        printf("expr = "); print_expr(*expr); putchar('\n');
-        printf("op   = "); print_expr(op); putchar('\n'); // TEMP TEMP
         THROW(Error_Type, "invalid type for operand passed to apply: %s", typename(op));
-        // return Error_Type;
     }
 }
 
@@ -634,7 +680,6 @@ int eval_do_return(Atom* stack, Atom* expr, Atom* env, Atom* result)
             op.type = AtomType_Closure;
             list_set(*stack, FRAME_OP, op);
             list_set(*stack, FRAME_ARGS, args);
-            printf("eval_do_return STACK FRAME[%d]: op = ", __LINE__); print_expr(op); putchar('\n'); // TEMP
             return eval_do_bind(stack, expr, env);
         }
     } else if (symbolp(op)) {
@@ -650,11 +695,12 @@ int eval_do_return(Atom* stack, Atom* expr, Atom* env, Atom* result)
             *expr = nilp(*result) ? car(cdr(args)) : car(args);
             *stack = car(*stack);
             return Error_OK;
-        } else if (symcmp(op, F_AND)) {
+        } /* else if (symcmp(op, F_AND)) {
             Atom args = list_get(*stack, FRAME_TAIL);
-            printf("eval_do_return F_AND: "); print_expr(args); putchar('\n');
-            exit(0);
-        } else {
+            *expr = nilp(*result) ? car(cdr(args)) : nil;
+            *stack = car(*stack);
+            return Error_OK;
+        } */ else {
             goto store_arg;
         }
     } else if (macrop(op)) {
@@ -725,13 +771,18 @@ int apply(Atom fn, Atom args, Atom* result)
 
 int eval_expr(Atom expr, Atom env, Atom* result)
 {
-    printf("eval_expr[%d]: ", __LINE__); print_expr(expr); putchar('\n');
-
+    static int count = 0;
     Error err = Error_OK;
     Atom stack = nil;
-    do {
-        printf("eval_expr do[%d]: ", __LINE__); print_expr(expr); putchar('\n');
 
+    do {
+        if (count++ == 100000) {
+            gc_mark(expr);
+            gc_mark(env);
+            gc_mark(stack);
+            gc();
+            count = 0;
+        }
 
         if (symbolp(expr)) {
             err = env_get(env, expr, result);
@@ -775,7 +826,7 @@ int eval_expr(Atom expr, Atom env, Atom* result)
                         stack = make_frame(stack, env, nil);
                         list_set(stack, FRAME_OP, op);
                         list_set(stack, FRAME_ARGS, sym);
-                        printf("eval_expr STACK FRAME[%d]: op = ", __LINE__); print_expr(op); putchar('\n'); // TEMP TEMP
+                        // printf("eval_expr STACK FRAME[%d]: op = ", __LINE__); print_expr(op); putchar('\n'); // TEMP TEMP
                         expr = car(cdr(args));
                         continue;
                     } else {
@@ -796,10 +847,10 @@ int eval_expr(Atom expr, Atom env, Atom* result)
                     }
                     stack = make_frame(stack, env, cdr(args));
                     list_set(stack, FRAME_OP, op);
-                    printf("eval_expr STACK FRAME[%d]: op = ", __LINE__); print_expr(op); putchar('\n'); // TEMP TEMP
+                    // printf("eval_expr STACK FRAME[%d]: op = ", __LINE__); print_expr(op); putchar('\n'); // TEMP TEMP
                     expr = car(args);
                     continue;
-                } else if (symcmp(op, F_AND)) {
+                } /* else if (symcmp(op, F_AND)) {
                     if (nilp(args)) {
                         THROW(Error_Type, "incorrect number of arguments passed to AND: %d", list_length_safe(args));
                     }
@@ -807,7 +858,7 @@ int eval_expr(Atom expr, Atom env, Atom* result)
                     list_set(stack, FRAME_OP, F_AND);
                     expr = car(args);
                     continue;
-                } else if (symcmp(op, F_DEFMACRO)) {
+                } */ else if (symcmp(op, F_DEFMACRO)) {
                     if (nilp(args) || nilp(cdr(args))) {
                         THROW(Error_Args, "incorrect number of arguments passed to DEFMACRO: %d", list_length_safe(args));
                         // return Error_Args;
@@ -835,7 +886,7 @@ int eval_expr(Atom expr, Atom env, Atom* result)
                     }
                     stack = make_frame(stack, env, cdr(args));
                     list_set(stack, FRAME_OP, op);
-                    printf("eval_expr STACK FRAME[%d]: op = ", __LINE__); print_expr(op); putchar('\n'); // TEMP TEMP
+                    // printf("eval_expr STACK FRAME[%d]: op = ", __LINE__); print_expr(op); putchar('\n'); // TEMP TEMP
                     expr = car(args);
                     continue;
                 } else {
@@ -848,7 +899,7 @@ push:
                 /* Handle function application */
                 stack = make_frame(stack, env, args);
                 expr = op;
-                printf("eval_expr STACK FRAME[%d]: op = ", __LINE__); print_expr(op); putchar('\n'); // TEMP
+                // printf("eval_expr STACK FRAME[%d]: op = ", __LINE__); print_expr(op); putchar('\n'); // TEMP
                 continue;
             }
         }
@@ -1124,14 +1175,15 @@ char* slurp(const char* filename)
     return buf;
 }
 
-void print_error(const char* msg)
+void print_error(Atom expr, int error)
 {
     if (errormsg) {
-        // printf("%s: %s (%d)\n", msg, errormsg, errorlinum);
         printf("%s\n", errormsg);
     } else {
-        printf("%s\n", msg);
+        printf("%s\n", ErrorNames[error]);
     }
+    printf("Error in expression:\n\t");
+    print_expr(expr); putchar('\n');
 }
 
 void load_file(Atom env, const char* filename)
@@ -1144,27 +1196,10 @@ void load_file(Atom env, const char* filename)
             Atom result;
             Error err = eval_expr(expr, env, &result);
             if (err != Error_OK) {
-                switch (err) {
-                    case Error_OK:
-                        print_expr(result); putchar('\n');
-                        break;
-                    case Error_Syntax:
-                        print_error("syntax error");
-                        break;
-                    case Error_Unbound:
-                        print_error("unbound symbol error");
-                        break;
-                    case Error_Args:
-                        print_error("argument error\n");
-                        break;
-                    case Error_Type:
-                        print_error("incorrect type error");
-                        break;
-                }
+                print_error(expr, err);
                 printf("Error in expression:\n\t");
                 print_expr(expr); putchar('\n');
             } else {
-                assert(err == Error_OK);
                 print_expr(result); putchar('\n');
             }
         }
@@ -1226,22 +1261,12 @@ void execute(const char* p, Atom env)
     if (err == Error_OK) {
         err = eval_expr(expr, env, &result);
     }
-    switch (err) {
-        case Error_OK:
-            print_expr(result); putchar('\n');
-            break;
-        case Error_Syntax:
-            print_error("syntax error");
-            break;
-        case Error_Unbound:
-            print_error("unbound symbol error");
-            break;
-        case Error_Args:
-            print_error("argument error\n");
-            break;
-        case Error_Type:
-            print_error("incorrect type error");
-            break;
+    if (err != Error_OK) {
+        print_error(expr, err);
+        printf("Error in expression:\n\t");
+        print_expr(expr); putchar('\n');
+    } else {
+        print_expr(result); putchar('\n');
     }
 }
 
