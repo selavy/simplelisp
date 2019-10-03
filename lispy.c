@@ -25,13 +25,13 @@ struct Atom;
 typedef int (*Builtin)(struct Atom args, struct Atom* result);
 
 const char* const TypeNames[] = {
-    "NIL",
-    "PAIR",
-    "SYMBOL",
-    "INTEGER",
-    "BUILTIN",
-    "CLOSURE",
-    "MACRO",
+    "nil",
+    "pair",
+    "symbol",
+    "integer",
+    "builtin",
+    "closure",
+    "macro",
 };
 
 typedef struct Atom {
@@ -68,6 +68,7 @@ Atom F_QUASIQUOTE;
 Atom F_UNQUOTE_SPLICING;
 Atom F_UNQUOTE;
 Atom F_AND;
+Atom F_APPLY;
 
 typedef enum {
     Error_OK = 0,
@@ -89,10 +90,9 @@ const char* errormsg = NULL;
 int         errorlinum = -1;
 
 #define panic(fmt, ...) do { fprintf(stderr, "ERR: " fmt "\n", ##__VA_ARGS__); exit(1); } while(0)
-#define SETERR(x, ...) seterr(__LINE__, "error(%d): " x, __LINE__, ##__VA_ARGS__)
 
 #define THROW(err, msg, ...) do { \
-    seterr(__LINE__, "%s [%d]:" msg, ErrorNames[err], __LINE__, ##__VA_ARGS__); \
+    seterr(__LINE__, "%s [%d]: " msg, ErrorNames[err], __LINE__, ##__VA_ARGS__); \
     return err; \
 } while(0)
 
@@ -152,6 +152,11 @@ int list_length(Atom list)
     return result;
 }
 
+int list_length_safe(Atom list)
+{
+    return listp(list) ? list_length(list) : 0;
+}
+
 Atom cons(Atom carval, Atom cdrval)
 {
     Atom p;
@@ -173,12 +178,31 @@ Atom make_int(long x)
     return a;
 }
 
-Atom make_builtin(Builtin fn)
+Atom builtinInfo = { .type = AtomType_Nil };
+Atom make_builtin(Builtin fn, Atom name)
 {
     Atom a;
     a.type = AtomType_Builtin;
     a.value.builtin = fn;
+    Atom info = cons(a, name);
+    builtinInfo = cons(info, builtinInfo);
     return a;
+}
+
+const char* get_builtin_name(Atom builtin)
+{
+    if (!builtinp(builtin)) {
+        return "not builtin";
+    }
+    Atom p = builtinInfo;
+    while (!nilp(p)) {
+        assert(pairp(p));
+        assert(pairp(car(p)));
+        if (tobuiltin(car(car(p))) == tobuiltin(builtin))
+            return tosymbol(cdr(car(p)));
+        p = cdr(p);
+    }
+    return "unknown builtin";
 }
 
 Atom sym_table = { .type = AtomType_Nil };
@@ -265,7 +289,8 @@ void print_expr(Atom atom)
             printf("%ld", tointeger(atom));
             break;
         case AtomType_Builtin:
-            printf("#<BUILTIN:%p>", tobuiltin(atom));
+            // printf("#<BUILTIN:%p>", tobuiltin(atom));
+            printf("#<BUILTIN:%s>", get_builtin_name(atom));
             break;
         case AtomType_Closure:
             printf("#<CLOSURE:%p>", atom.value.pair);
@@ -293,8 +318,8 @@ int lex(const char* str, const char** start, const char** end)
     }
     if (*str == '\0') {
         *start = *end = NULL;
-        SETERR("found unexpected end-of-input");
-        return Error_Syntax;
+        THROW(Error_Syntax, "found unexpected end-of-input");
+        // return Error_Syntax;
     }
 
     *start = str;
@@ -351,15 +376,15 @@ int read_list(const char* start, const char** end, Atom* result)
         } else if (token[0] == '.' && *end - token == 1) { // TODO: check this 2nd condition
             /* Improper list */
             if (nilp(p)) {
-                SETERR("improper list found in list context");
-                return Error_Syntax;
+                THROW(Error_Syntax, "improper list found in list context");
+                // return Error_Syntax;
             }
             TRY(read_expr(*end, end, &item));
             cdr(p) = item;
             TRY(lex(*end, &token, end));
             if (token[0] != ')') {
-                SETERR("list missing closing paren");
-                return Error_Syntax;
+                THROW(Error_Syntax, "list missing closing paren");
+                // return Error_Syntax;
             }
             return Error_OK;
         }
@@ -382,8 +407,8 @@ int read_expr(const char* input, const char** end, Atom* result)
     if (token[0] == '(') {
         return read_list(*end, end, result);
     } else if (token[0] == ')') {
-        SETERR("expression list missing closing paren");
-        return Error_Syntax;
+        THROW(Error_Syntax, "expression list missing closing paren");
+        // return Error_Syntax;
     } else if (token[0] == '\'') {
         *result = cons(F_QUOTE, cons(nil, nil));
         return read_expr(*end, end, &car(cdr(*result)));
@@ -397,6 +422,12 @@ int read_expr(const char* input, const char** end, Atom* result)
     } else {
         return parse_simple(token, *end, result);
     }
+}
+
+int symcmp(Atom a, Atom b) {
+    assert(symbolp(a));
+    assert(symbolp(b));
+    return tosymbol(a) == tosymbol(b);
 }
 
 Atom env_create(Atom parent) {
@@ -416,8 +447,8 @@ int env_get(Atom env, Atom symbol, Atom* result)
         entries = cdr(entries);
     }
     if (nilp(parent)) {
-        SETERR("%s", tosymbol(symbol));
-        return Error_Unbound;
+        THROW(Error_Unbound, "%s", tosymbol(symbol));
+        // return Error_Unbound;
     }
     return env_get(parent, symbol, result);
 }
@@ -439,6 +470,217 @@ int env_set(Atom env, Atom symbol, Atom value)
     return Error_OK;
 }
 
+Atom list_get(Atom list, int k)
+{
+    while (k--)
+        list = cdr(list);
+    return car(list);
+}
+
+void list_set(Atom list, int k, Atom value)
+{
+    while (k--)
+        list = cdr(list);
+    car(list) = value;
+}
+
+void list_reverse(Atom* list)
+{
+    Atom tail = nil;
+    while (!nilp(*list)) {
+        Atom p = cdr(*list);
+        cdr(*list) = tail;
+        tail = *list;
+        *list = p;
+    }
+    *list = tail;
+}
+
+Atom make_frame(Atom parent, Atom env, Atom tail)
+{
+    return cons(parent,
+            cons(env,
+            cons(nil, /* op */
+            cons(tail,
+            cons(nil, /* args */
+            cons(nil, /* body */
+            nil))))));
+}
+
+enum {
+    FRAME_PARENT = 0,
+    FRAME_ENV,  // 1
+    FRAME_OP,   // 2
+    FRAME_TAIL, // 3
+    FRAME_ARGS, // 4
+    FRAME_BODY, // 5
+};
+
+int eval_do_exec(Atom* stack, Atom* expr, Atom* env)
+{
+    Atom body;
+    *env = list_get(*stack, FRAME_ENV);
+    body = list_get(*stack, FRAME_BODY);
+    *expr = car(body);
+    body = cdr(body);
+    if (nilp(body)) {
+        *stack = car(*stack); // pop stack bc function finished
+    } else {
+        list_set(*stack, FRAME_BODY, body);
+    }
+    return Error_OK;
+}
+
+int eval_do_bind(Atom* stack, Atom* expr, Atom* env)
+{
+    Atom op, args, params, body;
+    body = list_get(*stack, FRAME_BODY);
+    if (!nilp(body))
+        return eval_do_exec(stack, expr, env);
+
+    op = list_get(*stack, FRAME_OP);
+    args = list_get(*stack, FRAME_ARGS);
+
+    *env = env_create(car(op));
+    params = car(cdr(op));
+    body = cdr(cdr(op));
+    list_set(*stack, FRAME_ENV, *env);
+    list_set(*stack, FRAME_BODY, body);
+
+    while (!nilp(params)) {
+        // REVISIT: why does this ever happen
+        if (symbolp(params)) {
+            env_set(*env, params, args);
+            args = nil;
+            break;
+        }
+        if (nilp(args)) {
+            THROW(Error_Args, "too few arguments passed to function");
+            // return Error_Args;
+        }
+        env_set(*env, car(params), car(args));
+        params = cdr(params);
+        args = cdr(args);
+    }
+
+    if (!nilp(args)) {
+        THROW(Error_Args, "too many arguments passed to function.");
+        // return Error_Args;
+    }
+
+    list_set(*stack, FRAME_ARGS, nil);
+    return eval_do_exec(stack, expr, env);
+}
+
+int eval_do_apply(Atom* stack, Atom* expr, Atom* env, Atom* result)
+{
+    Atom op = list_get(*stack, FRAME_OP);
+    Atom args = list_get(*stack, FRAME_ARGS);
+
+    if (!nilp(args)) {
+        list_reverse(&args);
+        list_set(*stack, FRAME_ARGS, args);
+    }
+
+    if (symbolp(op) && symcmp(op, F_APPLY)) {
+        /* Replace the current frame */
+        *stack = car(*stack);
+        *stack = make_frame(*stack, *env, nil);
+        op = car(args);
+        args = car(cdr(args));
+        if (!listp(args)) {
+            THROW(Error_Syntax, "argument must be of type list");
+            // return Error_Syntax;
+        }
+        list_set(*stack, FRAME_OP, op);
+        list_set(*stack, FRAME_ARGS, args);
+        printf("eval_do_apply STACK FRAME[%d]: op = ", __LINE__); print_expr(op); putchar('\n'); // TEMP TEMP
+    }
+
+    if (builtinp(op)) {
+        *stack = car(*stack);
+        *expr = cons(op, args);
+        return Error_OK;
+    } else if (closurep(op)) {
+        return eval_do_bind(stack, expr, env);
+    } else {
+        printf("expr = "); print_expr(*expr); putchar('\n');
+        printf("op   = "); print_expr(op); putchar('\n'); // TEMP TEMP
+        THROW(Error_Type, "invalid type for operand passed to apply: %s", typename(op));
+        // return Error_Type;
+    }
+}
+
+int eval_do_return(Atom* stack, Atom* expr, Atom* env, Atom* result)
+{
+    Atom args, op, body;
+    *env = list_get(*stack, FRAME_ENV);
+    op = list_get(*stack, FRAME_OP);
+    body = list_get(*stack, FRAME_BODY);
+
+    if (!nilp(body)) {
+        /* Still running a procedure; ignore the result */
+        return eval_do_apply(stack, expr, env, result);
+    }
+
+    if (nilp(op)) {
+        /* Finished evaluating the operator */
+        op = *result;
+        list_set(*stack, FRAME_OP, op);
+        if (macrop(op)) {
+            /* Don't evaluate macro arguments */
+            args = list_get(*stack, FRAME_TAIL);
+            *stack = make_frame(*stack, *env, nil);
+            op.type = AtomType_Closure;
+            list_set(*stack, FRAME_OP, op);
+            list_set(*stack, FRAME_ARGS, args);
+            printf("eval_do_return STACK FRAME[%d]: op = ", __LINE__); print_expr(op); putchar('\n'); // TEMP
+            return eval_do_bind(stack, expr, env);
+        }
+    } else if (symbolp(op)) {
+        /* Finished working on special form */
+        if (symcmp(op, F_DEFINE)) {
+            Atom sym = list_get(*stack, FRAME_ARGS);
+            (void) env_set(*env, sym, *result);
+            *stack = car(*stack);
+            *expr = cons(F_QUOTE, cons(sym, nil));
+            return Error_OK;
+        } else if (symcmp(op, F_IF)) {
+            Atom args = list_get(*stack, FRAME_TAIL);
+            *expr = nilp(*result) ? car(cdr(args)) : car(args);
+            *stack = car(*stack);
+            return Error_OK;
+        } else if (symcmp(op, F_AND)) {
+            Atom args = list_get(*stack, FRAME_TAIL);
+            printf("eval_do_return F_AND: "); print_expr(args); putchar('\n');
+            exit(0);
+        } else {
+            goto store_arg;
+        }
+    } else if (macrop(op)) {
+        /* Finished evaluating macro */
+        *expr = *result;
+        *stack = car(*stack);
+        return Error_OK;
+    } else {
+store_arg:
+        /* Store evaluated argument */
+        args = list_get(*stack, FRAME_ARGS);
+        list_set(*stack, FRAME_ARGS, cons(*result, args));
+    }
+
+    args = list_get(*stack, FRAME_TAIL);
+    if (nilp(args)) {
+        /* No more arguments left to evaluate */
+        return eval_do_apply(stack, expr, env, result);
+    }
+
+    /* Evaluate next argument */
+    *expr = car(args);
+    list_set(*stack, FRAME_TAIL, cdr(args));
+    return Error_OK;
+}
+
 int eval_expr(Atom expr, Atom env, Atom* result);
 
 int apply(Atom fn, Atom args, Atom* result)
@@ -448,8 +690,8 @@ int apply(Atom fn, Atom args, Atom* result)
     if (builtinp(fn))
         return (*tobuiltin(fn))(args, result);
     else if (!closurep(fn)) {
-        SETERR("tried to apply object that is not builtin or closure: %s", typename(fn));
-        return Error_Type;
+        THROW(Error_Type, "cannot `apply` object of type %s", typename(fn));
+        // return Error_Type;
     }
 
     env = env_create(car(fn));
@@ -468,8 +710,10 @@ int apply(Atom fn, Atom args, Atom* result)
         params = cdr(params);
         args   = cdr(args);
     }
-    if (!nilp(params) && !nilp(args))
-        return Error_Args;
+    if (!nilp(params) && !nilp(args)) {
+        THROW(Error_Args, "incorrect number of arguments passed to function");
+        // return Error_Args;
+    }
 
     while (!nilp(body)) {
         TRY(eval_expr(car(body), env, result));
@@ -479,133 +723,157 @@ int apply(Atom fn, Atom args, Atom* result)
     return Error_OK;
 }
 
-int symcmp(Atom a, Atom b) {
-    assert(symbolp(a));
-    assert(symbolp(b));
-    return tosymbol(a) == tosymbol(b);
-}
-
 int eval_expr(Atom expr, Atom env, Atom* result)
 {
-    Atom op, args, p;
+    printf("eval_expr[%d]: ", __LINE__); print_expr(expr); putchar('\n');
 
-    if (symbolp(expr)) {
-        return env_get(env, expr, result);
-    } else if (!pairp(expr)) {
-        *result = expr;
-        return Error_OK;
-    } else if (!listp(expr) /* && !closurep(expr) */) {
-        SETERR("expression is not symbol, pair, or list: %s", typename(expr));
-        return Error_Syntax;
-    }
+    Error err = Error_OK;
+    Atom stack = nil;
+    do {
+        printf("eval_expr do[%d]: ", __LINE__); print_expr(expr); putchar('\n');
 
-    op = car(expr);
-    args = cdr(expr);
-    if (symbolp(op)) {
-        if (symcmp(op, F_IF)) {
-            // form ( <IF> . ( <TEST> . ( <TRUE-EXPR> . ( <FALSE-EXPRE> . NIL ) ) ) )
-            Atom cond, val;
-            CHECKARGN(args, 3);
-            TRY(eval_expr(car(args), env, &cond));
-            val = nilp(cond) ? car(cdr(cdr(args))) : car(cdr(args));
-            return eval_expr(val, env, result);
-        } else if (symcmp(op, F_AND)) {
-            // form ( <AND> <ARGS>... )
-            if (nilp(args))
-                return Error_Args;
-            Atom cond;
-            while (!nilp(args)) {
-                assert(pairp(args));
-                TRY(eval_expr(car(args), env, &cond));
-                if (nilp(cond)) {
-                    *result = nil;
-                    return Error_OK;
+
+        if (symbolp(expr)) {
+            err = env_get(env, expr, result);
+        } else if (!pairp(expr)) {
+            *result = expr;
+        } else if (!listp(expr)) {
+            THROW(Error_Syntax, "cannot eval object of type %s", typename(expr));
+            // return Error_Syntax;
+        } else {
+            Atom op = car(expr);
+            Atom args = cdr(expr);
+            if (symbolp(op)) {
+                /* Handle Special Forms */
+                if (symcmp(op, F_QUOTE)) {
+                    if (nilp(args) || !nilp(cdr(args))) {
+                        THROW(Error_Args, "incorrect number of arguments passed to QUOTE: %d", list_length_safe(args));
+                        // return Error_Args;
+                    }
+                    *result = car(args);
+                } else if (symcmp(op, F_DEFINE)) {
+                    if (nilp(args) || nilp(cdr(args))) {
+                        THROW(Error_Args, "incorrect number of arguments passed to DEFINE: %d", list_length_safe(args));
+                        // return Error_Args;
+                    }
+                    Atom sym = car(args);
+                    if (pairp(sym)) {
+                        // handle special form of (define (func-name args...) body...)
+                        err = make_closure(env, cdr(sym), cdr(args), result);
+                        sym = car(sym);
+                        if (!symbolp(sym)) {
+                            THROW(Error_Type, "received object of type %s where expecting a symbol for lambda special form", typename(sym));
+                            // return Error_Type;
+                        }
+                        (void) env_set(env, sym, *result);
+                        *result = sym;
+                    } else if (symbolp(sym)) {
+                        if (!nilp(cdr(cdr(args)))) {
+                            THROW(Error_Args, "incorrect number of arguments passed to DEFINE: %d", list_length_safe(args));
+                            // return Error_Args;
+                        }
+                        stack = make_frame(stack, env, nil);
+                        list_set(stack, FRAME_OP, op);
+                        list_set(stack, FRAME_ARGS, sym);
+                        printf("eval_expr STACK FRAME[%d]: op = ", __LINE__); print_expr(op); putchar('\n'); // TEMP TEMP
+                        expr = car(cdr(args));
+                        continue;
+                    } else {
+                        THROW(Error_Type, "cannot assign to object type of %s", typename(sym));
+                        // return Error_Type;
+                    }
+                } else if (symcmp(op, F_LAMBDA)) {
+                    if (nilp(args) || nilp(cdr(args))) {
+                        THROW(Error_Type, "incorrect number of arguments passed to LAMBDA: %d", list_length_safe(args));
+                        // return Error_Args;
+                    }
+                    err = make_closure(env, car(args), cdr(args), result);
+                } else if (symcmp(op, F_IF)) {
+                    if (nilp(args) || nilp(cdr(args)) || nilp(cdr(cdr(args)))
+                            || !nilp(cdr(cdr(cdr(args))))) {
+                        THROW(Error_Type, "incorrect number of arguments passed to IF: %d", list_length_safe(args));
+                        // return Error_Args;
+                    }
+                    stack = make_frame(stack, env, cdr(args));
+                    list_set(stack, FRAME_OP, op);
+                    printf("eval_expr STACK FRAME[%d]: op = ", __LINE__); print_expr(op); putchar('\n'); // TEMP TEMP
+                    expr = car(args);
+                    continue;
+                } else if (symcmp(op, F_AND)) {
+                    if (nilp(args)) {
+                        THROW(Error_Type, "incorrect number of arguments passed to AND: %d", list_length_safe(args));
+                    }
+                    stack = make_frame(stack, env, cdr(args));
+                    list_set(stack, FRAME_OP, F_AND);
+                    expr = car(args);
+                    continue;
+                } else if (symcmp(op, F_DEFMACRO)) {
+                    if (nilp(args) || nilp(cdr(args))) {
+                        THROW(Error_Args, "incorrect number of arguments passed to DEFMACRO: %d", list_length_safe(args));
+                        // return Error_Args;
+                    }
+                    if (!pairp(car(args))) {
+                        THROW(Error_Syntax, "first argument of DEFMACRO must be a pair, received %s", typename(car(args)));
+                        // return Error_Syntax;
+                    }
+                    Atom name = car(car(args));
+                    if (!symbolp(name)) {
+                        THROW(Error_Type, "cannot name DEFMACRO with object of type: %s", typename(name));
+                        // return Error_Type;
+                    }
+                    Atom macro;
+                    err = make_closure(env, cdr(car(args)), cdr(args), &macro);
+                    if (err == Error_OK) {
+                        macro.type = AtomType_Macro;
+                        *result = name;
+                        (void) env_set(env, name, macro);
+                    }
+                } else if (symcmp(op, F_APPLY)) {
+                    if (nilp(args) || nilp(cdr(args)) || !nilp(cdr(cdr(args)))) {
+                        THROW(Error_Args, "incorrect number of arguments passed to APPLY: %d", typename(args));
+                        // return Error_Args;
+                    }
+                    stack = make_frame(stack, env, cdr(args));
+                    list_set(stack, FRAME_OP, op);
+                    printf("eval_expr STACK FRAME[%d]: op = ", __LINE__); print_expr(op); putchar('\n'); // TEMP TEMP
+                    expr = car(args);
+                    continue;
+                } else {
+                    goto push;
                 }
-                args = cdr(args);
-            }
-            *result = make_int(1);
-            return Error_OK;
-        } else if (symcmp(op, F_QUOTE)) {
-            // form ( <QUOTE> . ( <ATOM> . NIL ) )
-            CHECKARGN(args, 1);
-            *result = car(args);
-            return Error_OK;
-        } else if (symcmp(op, F_DEFINE)) {
-            // form #1: ( <DEFINE> . ( <SYMBOL> . ( <EXPR> . NIL ) ) )
-            // form #2: ( <DEFINE> . ( ( <NAME> . <ARGS>... ) . ( <BODY> . NIL ) ) )
-            Atom sym, val;
-            if (nilp(args)) return Error_Syntax;
-            sym = car(args);
-            if (symbolp(sym)) { // form #1
-                CHECKARGN(args, 2);
-                sym = car(args);
-                CHECKTYPE(sym, symbolp);
-                TRY(eval_expr(car(cdr(args)), env, &val));
-            } else if (pairp(sym)) { // form #2
-                CHECKARGN(args, 2);
-                TRY(make_closure(env, cdr(sym), cdr(args), &val));
-                sym = car(sym);
-                CHECKTYPE(sym, symbolp);
+            } else if (builtinp(op)) {
+                err = (*op.value.builtin)(args, result);
             } else {
-                return Error_Syntax;
+push:
+                /* Handle function application */
+                stack = make_frame(stack, env, args);
+                expr = op;
+                printf("eval_expr STACK FRAME[%d]: op = ", __LINE__); print_expr(op); putchar('\n'); // TEMP
+                continue;
             }
-            *result = sym;
-            return env_set(env, sym, val);
-        } else if (symcmp(op, F_LAMBDA)) {
-            // form: ( <LAMBDA> . ( (ARGS...) . ( (BODY...) . NIL ) ) )
-            if (nilp(args) || nilp(cdr(args)))
-                return Error_Args;
-            return make_closure(env, car(args), cdr(args), result);
-        } else if (symcmp(op, F_DEFMACRO)) {
-            Atom name, macro;
-
-            if (nilp(args) || nilp(cdr(args)))
-                return Error_Args;
-            if (!pairp(car(args)))
-                return Error_Syntax;
-            name = car(car(args));
-            if (!symbolp(name)) {
-                SETERR("expected symbol for name of macro: %s", typename(name));
-                return Error_Type;
-            }
-            TRY(make_closure(env, cdr(car(args)), cdr(args), &macro));
-            macro.type = AtomType_Macro;
-            *result = name;
-            return env_set(env, name, macro);
         }
-    }
 
-    /* Evaluate operator */
-    TRY(eval_expr(op, env, &op));
+        if(nilp(stack))
+            break;
 
-    /* Is it a macro? */
-    if (macrop(op)) {
-        Atom expansion;
-        op.type = AtomType_Closure;
-        TRY(apply(op, args, &expansion));
-        return eval_expr(expansion, env, result);
-    }
+        if (err == Error_OK)
+            err = eval_do_return(&stack, &expr, &env, result);
 
-    /* Evaluate arguments */
-    // TODO: why do I need to copy the list?
-    args = copy_list(args);
-    p = args;
-    while (!nilp(p)) {
-        TRY(eval_expr(car(p), env, &car(p)));
-        p = cdr(p);
-    }
+    } while (err == Error_OK);
 
-    return apply(op, args, result);
+    return err;
 }
 
 int builtin_car(Atom args, Atom* result)
 {
     if (nilp(args) || !nilp(cdr(args))) {
-        return Error_Args;
+        THROW(Error_Args, "invalid number of arguments to car, expected 2, received %d", list_length_safe(args));
+        // return Error_Args;
     } else if (nilp(car(args))) {
         *result = nil;
     } else if (!pairp(car(args))) {
-        return Error_Type;
+        THROW(Error_Type, "invalid argument type to car: %s", typename(car(args)));
+        // return Error_Type;
     } else {
         *result = car(car(args));
     }
@@ -615,11 +883,13 @@ int builtin_car(Atom args, Atom* result)
 int builtin_cdr(Atom args, Atom* result)
 {
     if (nilp(args) || !nilp(cdr(args))) {
-        return Error_Args;
+        THROW(Error_Args, "invalid number of arguments to CDR, expected 2, received %d", list_length_safe(args));
+        // return Error_Args;
     } else if (nilp(car(args))) {
         *result = nil;
     } else if (!pairp(car(args))) {
-        return Error_Type;
+        THROW(Error_Type, "invalid argument type to cdr: %s", typename(car(args)));
+        // return Error_Type;
     } else {
         *result = cdr(car(args));
     }
@@ -629,8 +899,11 @@ int builtin_cdr(Atom args, Atom* result)
 int builtin_cons(Atom args, Atom* result)
 {
     // if (nilp(args) || nilp(cdr(args)) || !nilp(cdr(cdr(args))))
-    if (nilp(args) || list_length(args) != 2)
-        return Error_Args;
+    // if (nilp(args) || list_length(args) != 2) {
+    if (list_length_safe(args) != 2) {
+        THROW(Error_Args, "invalid number of arguments to CONS, expected 2, received %d", list_length_safe(args));
+        // return Error_Args;
+    }
     *result = cons(car(args), car(cdr(args)));
     return Error_OK;
 }
@@ -854,7 +1127,8 @@ char* slurp(const char* filename)
 void print_error(const char* msg)
 {
     if (errormsg) {
-        printf("%s: %s (%d)\n", msg, errormsg, errorlinum);
+        // printf("%s: %s (%d)\n", msg, errormsg, errorlinum);
+        printf("%s\n", errormsg);
     } else {
         printf("%s\n", msg);
     }
@@ -900,6 +1174,11 @@ void load_file(Atom env, const char* filename)
     free(text);
 }
 
+void add_builtin(Atom env, Atom name, Builtin fn)
+{
+    env_set(env, name, make_builtin(fn, name));
+}
+
 Atom init() {
     F_QUOTE            = make_sym("QUOTE");
     F_DEFINE           = make_sym("DEFINE");
@@ -910,24 +1189,25 @@ Atom init() {
     F_UNQUOTE_SPLICING = make_sym("UNQUOTE-SPLICING");
     F_UNQUOTE          = make_sym("UNQUOTE");
     F_AND              = make_sym("AND");
+    F_APPLY            = make_sym("APPLY");
 
     Atom env = env_create(nil);
 
-    env_set(env, make_sym("CAR"),   make_builtin(&builtin_car));
-    env_set(env, make_sym("CDR"),   make_builtin(&builtin_cdr));
-    env_set(env, make_sym("CONS"),  make_builtin(&builtin_cons));
-    env_set(env, make_sym("APPLY"), make_builtin(&builtin_apply));
-    env_set(env, make_sym("EQ?"),   make_builtin(&builtin_eq));
-    env_set(env, make_sym("PAIR?"), make_builtin(&builtin_pairp));
-    env_set(env, make_sym("+"),     make_builtin(&builtin_add));
-    env_set(env, make_sym("-"),     make_builtin(&builtin_subtract));
-    env_set(env, make_sym("*"),     make_builtin(&builtin_multiply));
-    env_set(env, make_sym("/"),     make_builtin(&builtin_divide));
-    env_set(env, make_sym("="),     make_builtin(&builtin_numeq));
-    env_set(env, make_sym("<"),     make_builtin(&builtin_numlt));
-    env_set(env, make_sym(">"),     make_builtin(&builtin_numgt));
-    env_set(env, make_sym("<="),    make_builtin(&builtin_numlte));
-    env_set(env, make_sym(">="),    make_builtin(&builtin_numgte));
+    add_builtin(env, make_sym("CAR"),   &builtin_car);
+    add_builtin(env, make_sym("CDR"),   &builtin_cdr);
+    add_builtin(env, make_sym("CONS"),  &builtin_cons);
+    add_builtin(env, make_sym("APPLY"), &builtin_apply);
+    add_builtin(env, make_sym("EQ?"),   &builtin_eq);
+    add_builtin(env, make_sym("PAIR?"), &builtin_pairp);
+    add_builtin(env, make_sym("+"),     &builtin_add);
+    add_builtin(env, make_sym("-"),     &builtin_subtract);
+    add_builtin(env, make_sym("*"),     &builtin_multiply);
+    add_builtin(env, make_sym("/"),     &builtin_divide);
+    add_builtin(env, make_sym("="),     &builtin_numeq);
+    add_builtin(env, make_sym("<"),     &builtin_numlt);
+    add_builtin(env, make_sym(">"),     &builtin_numgt);
+    add_builtin(env, make_sym("<="),    &builtin_numlte);
+    add_builtin(env, make_sym(">="),    &builtin_numgte);
 
     env_set(env, make_sym("T"), make_sym("T"));
     env_set(env, make_sym("F"), make_sym("F"));
